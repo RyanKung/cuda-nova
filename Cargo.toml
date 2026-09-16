@@ -23,20 +23,16 @@ light-poseidon.workspace = true
 halo2curves.workspace = true
 nova-snark.workspace = true
 thiserror.workspace = true
-topology-commitment = { package = "zkfly-commitment", path = "../zkfly-commitment" }
+topology-commitment.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
 cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
 cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
+topology-nova.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies.topology-nova]
-package = "zkfly-nova"
-path = "../zkfly-nova"
-
-[target.'cfg(not(target_os = "linux"))'.dependencies.topology-nova]
-package = "zkfly-nova"
-path = "../zkfly-nova"
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+topology-nova.workspace = true
 
 [lints]
 workspace = true
