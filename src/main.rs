@@ -9,8 +9,8 @@ use std::{
 use cuda_nova::{CudaNovaEngine, CudaNovaError};
 use halo2curves::bn256::Fr;
 use halo2curves::ff::Field;
-use zkfly_commitment::{Commitment, TopologyFoldStep, commit_topology_with_trace};
-use zkfly_nova::{CsrTopology, WeightedForwardWitness};
+use topology_commitment::{Commitment, TopologyFoldStep, commit_topology_with_trace};
+use topology_nova::{CsrTopology, WeightedForwardWitness};
 
 /// Generates a two-step canonical transcript and validates it on CUDA.
 fn main() -> Result<(), CudaNovaError> {
@@ -118,7 +118,7 @@ fn run_proof(
     let proof_microseconds = proof_start.elapsed().as_micros();
     if !proof.verify_against_root(claimed_root)? {
         return Err(CudaNovaError::Nova(
-            zkfly_nova::TopologyNovaError::InvalidFinalState,
+            topology_nova::TopologyNovaError::InvalidFinalState,
         ));
     }
     println!(
@@ -184,7 +184,7 @@ fn run_weighted_forward(
         second.output_commitment(),
     )? {
         return Err(CudaNovaError::Nova(
-            zkfly_nova::TopologyNovaError::InvalidFinalState,
+            topology_nova::TopologyNovaError::InvalidFinalState,
         ));
     }
     let stats = engine.gpu_backend_stats();
@@ -250,7 +250,7 @@ fn run_forward_profile(
         let verify_microseconds = verify_start.elapsed().as_micros();
         if !verified {
             return Err(CudaNovaError::Nova(
-                zkfly_nova::TopologyNovaError::InvalidFinalState,
+                topology_nova::TopologyNovaError::InvalidFinalState,
             ));
         }
         let step_count_u64 =
@@ -305,7 +305,7 @@ fn run_chunked_forward(
     let verify_microseconds = verify_start.elapsed().as_micros();
     if !verified {
         return Err(CudaNovaError::Nova(
-            zkfly_nova::TopologyNovaError::InvalidFinalState,
+            topology_nova::TopologyNovaError::InvalidFinalState,
         ));
     }
     println!(
@@ -338,7 +338,7 @@ fn ptau_dir_from_args() -> Option<PathBuf> {
 #[cfg(feature = "hyperkzg")]
 fn required_ptau_dir(ptau_dir: Option<&Path>) -> Result<&Path, CudaNovaError> {
     ptau_dir.ok_or(CudaNovaError::Nova(
-        zkfly_nova::TopologyNovaError::HyperKzgSetupRequired,
+        topology_nova::TopologyNovaError::HyperKzgSetupRequired,
     ))
 }
 

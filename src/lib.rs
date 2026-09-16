@@ -1,7 +1,7 @@
 //! CUDA sidecar for the official `nova-snark` topology prover.
 //!
 //! The crate is intentionally shaped as a future standalone repository. The
-//! official Nova proof relation lives in [`zkfly_nova`], while this crate owns
+//! official Nova proof relation lives in the topology proof adapter, while this crate owns
 //! the CUDA context, PTX module, device buffers, and arithmetic backend. Nova
 //! still constructs the Bellpepper circuit and controls the recursive protocol;
 //! arithmetic-heavy R1CS `SpMV`, NIFS cross-terms, and relaxed-witness folds can
@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use thiserror::Error;
-use zkfly_commitment::{Commitment, POSEIDON_RATE, TopologyFoldStep};
+use topology_commitment::{Commitment, POSEIDON_RATE, TopologyFoldStep};
 
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 mod cuda_backend;
@@ -126,10 +126,10 @@ pub enum CudaNovaError {
     BackendUnavailable,
     /// The official Nova relation rejected a transition or proof operation.
     #[error(transparent)]
-    Nova(#[from] zkfly_nova::TopologyNovaError),
+    Nova(#[from] topology_nova::TopologyNovaError),
     /// The shared topology commitment rejected the input fixture.
     #[error(transparent)]
-    Commitment(#[from] zkfly_commitment::CommitmentError),
+    Commitment(#[from] topology_commitment::CommitmentError),
     /// A CUDA driver operation failed.
     #[cfg(all(feature = "cuda", target_os = "linux"))]
     #[error(transparent)]
@@ -294,9 +294,9 @@ impl CudaNovaEngine {
     pub fn prove(
         &self,
         steps: &[TopologyFoldStep],
-    ) -> Result<zkfly_nova::TopologyNovaProof, CudaNovaError> {
+    ) -> Result<topology_nova::TopologyNovaProof, CudaNovaError> {
         self.validate_poseidon_steps(steps)?;
-        Ok(zkfly_nova::TopologyNovaProof::prove(steps)?)
+        Ok(topology_nova::TopologyNovaProof::prove(steps)?)
     }
 
     /// GPU-preflights a transcript and proves it against an external root.
@@ -313,9 +313,9 @@ impl CudaNovaEngine {
         &self,
         steps: &[TopologyFoldStep],
         claimed_root: Commitment,
-    ) -> Result<zkfly_nova::TopologyNovaProof, CudaNovaError> {
+    ) -> Result<topology_nova::TopologyNovaProof, CudaNovaError> {
         self.validate_poseidon_steps(steps)?;
-        Ok(zkfly_nova::TopologyNovaProof::prove_for_root(
+        Ok(topology_nova::TopologyNovaProof::prove_for_root(
             steps,
             claimed_root,
         )?)
@@ -331,9 +331,9 @@ impl CudaNovaEngine {
         &self,
         steps: &[TopologyFoldStep],
         ptau_dir: &Path,
-    ) -> Result<zkfly_nova::TopologyNovaProof, CudaNovaError> {
+    ) -> Result<topology_nova::TopologyNovaProof, CudaNovaError> {
         self.validate_poseidon_steps(steps)?;
-        Ok(zkfly_nova::TopologyNovaProof::prove_with_ptau_dir(
+        Ok(topology_nova::TopologyNovaProof::prove_with_ptau_dir(
             steps, ptau_dir,
         )?)
     }
@@ -349,13 +349,15 @@ impl CudaNovaEngine {
         steps: &[TopologyFoldStep],
         claimed_root: Commitment,
         ptau_dir: &Path,
-    ) -> Result<zkfly_nova::TopologyNovaProof, CudaNovaError> {
+    ) -> Result<topology_nova::TopologyNovaProof, CudaNovaError> {
         self.validate_poseidon_steps(steps)?;
-        Ok(zkfly_nova::TopologyNovaProof::prove_for_root_with_ptau_dir(
-            steps,
-            claimed_root,
-            ptau_dir,
-        )?)
+        Ok(
+            topology_nova::TopologyNovaProof::prove_for_root_with_ptau_dir(
+                steps,
+                claimed_root,
+                ptau_dir,
+            )?,
+        )
     }
 
     /// Proves a sequence of private weighted forward passes for one fixed CSR
@@ -375,14 +377,14 @@ impl CudaNovaEngine {
     /// chaining or circuit synthesis fails.
     pub fn prove_weighted_forward(
         &self,
-        topology: std::sync::Arc<zkfly_nova::CsrTopology>,
-        witnesses: &[zkfly_nova::WeightedForwardWitness],
-    ) -> Result<zkfly_nova::WeightedForwardProof, CudaNovaError> {
+        topology: std::sync::Arc<topology_nova::CsrTopology>,
+        witnesses: &[topology_nova::WeightedForwardWitness],
+    ) -> Result<topology_nova::WeightedForwardProof, CudaNovaError> {
         #[cfg(all(feature = "cuda", target_os = "linux"))]
         {
             let first = witnesses
                 .first()
-                .ok_or(zkfly_nova::TopologyNovaError::EmptyTrace)?;
+                .ok_or(topology_nova::TopologyNovaError::EmptyTrace)?;
             let parameters = self.setup_weighted_forward(topology, first)?;
             return self.prove_weighted_forward_with_parameters(&parameters, witnesses);
         }
@@ -406,13 +408,13 @@ impl CudaNovaEngine {
     /// or the official Nova setup error when the shape witness is invalid.
     pub fn setup_weighted_forward(
         &self,
-        topology: std::sync::Arc<zkfly_nova::CsrTopology>,
-        shape_witness: &zkfly_nova::WeightedForwardWitness,
-    ) -> Result<zkfly_nova::WeightedForwardParameters, CudaNovaError> {
+        topology: std::sync::Arc<topology_nova::CsrTopology>,
+        shape_witness: &topology_nova::WeightedForwardWitness,
+    ) -> Result<topology_nova::WeightedForwardParameters, CudaNovaError> {
         #[cfg(all(feature = "cuda", target_os = "linux"))]
         {
             let _ = &self.runtime;
-            return Ok(zkfly_nova::WeightedForwardParameters::setup(
+            return Ok(topology_nova::WeightedForwardParameters::setup(
                 topology,
                 shape_witness,
             )?);
@@ -433,18 +435,20 @@ impl CudaNovaEngine {
     #[cfg(feature = "hyperkzg")]
     pub fn setup_weighted_forward_with_ptau_dir(
         &self,
-        topology: std::sync::Arc<zkfly_nova::CsrTopology>,
-        shape_witness: &zkfly_nova::WeightedForwardWitness,
+        topology: std::sync::Arc<topology_nova::CsrTopology>,
+        shape_witness: &topology_nova::WeightedForwardWitness,
         ptau_dir: &Path,
-    ) -> Result<zkfly_nova::WeightedForwardParameters, CudaNovaError> {
+    ) -> Result<topology_nova::WeightedForwardParameters, CudaNovaError> {
         #[cfg(all(feature = "cuda", target_os = "linux"))]
         {
             let _ = &self.runtime;
-            return Ok(zkfly_nova::WeightedForwardParameters::setup_with_ptau_dir(
-                topology,
-                shape_witness,
-                ptau_dir,
-            )?);
+            return Ok(
+                topology_nova::WeightedForwardParameters::setup_with_ptau_dir(
+                    topology,
+                    shape_witness,
+                    ptau_dir,
+                )?,
+            );
         }
 
         #[cfg(not(all(feature = "cuda", target_os = "linux")))]
@@ -467,13 +471,13 @@ impl CudaNovaEngine {
     /// or the official Nova error when witness chaining or folding fails.
     pub fn prove_weighted_forward_with_parameters(
         &self,
-        parameters: &zkfly_nova::WeightedForwardParameters,
-        witnesses: &[zkfly_nova::WeightedForwardWitness],
-    ) -> Result<zkfly_nova::WeightedForwardProof, CudaNovaError> {
+        parameters: &topology_nova::WeightedForwardParameters,
+        witnesses: &[topology_nova::WeightedForwardWitness],
+    ) -> Result<topology_nova::WeightedForwardProof, CudaNovaError> {
         #[cfg(all(feature = "cuda", target_os = "linux"))]
         {
             let _ = &self.runtime;
-            return Ok(zkfly_nova::WeightedForwardProof::prove_with_parameters(
+            return Ok(topology_nova::WeightedForwardProof::prove_with_parameters(
                 parameters, witnesses,
             )?);
         }
@@ -493,15 +497,15 @@ impl CudaNovaEngine {
     #[cfg(feature = "hyperkzg")]
     pub fn prove_weighted_forward_with_ptau_dir(
         &self,
-        topology: std::sync::Arc<zkfly_nova::CsrTopology>,
-        witnesses: &[zkfly_nova::WeightedForwardWitness],
+        topology: std::sync::Arc<topology_nova::CsrTopology>,
+        witnesses: &[topology_nova::WeightedForwardWitness],
         ptau_dir: &Path,
-    ) -> Result<zkfly_nova::WeightedForwardProof, CudaNovaError> {
+    ) -> Result<topology_nova::WeightedForwardProof, CudaNovaError> {
         #[cfg(all(feature = "cuda", target_os = "linux"))]
         {
             let first = witnesses
                 .first()
-                .ok_or(zkfly_nova::TopologyNovaError::EmptyTrace)?;
+                .ok_or(topology_nova::TopologyNovaError::EmptyTrace)?;
             let parameters =
                 self.setup_weighted_forward_with_ptau_dir(topology, first, ptau_dir)?;
             return self.prove_weighted_forward_with_parameters(&parameters, witnesses);
@@ -616,7 +620,7 @@ pub fn encode_steps(steps: &[TopologyFoldStep]) -> Result<Vec<u8>, CudaNovaError
             .any(|field| field.iter().any(|byte| *byte != 0))
         {
             return Err(CudaNovaError::Nova(
-                zkfly_nova::TopologyNovaError::NonZeroPadding { index: step.index },
+                topology_nova::TopologyNovaError::NonZeroPadding { index: step.index },
             ));
         }
         encoded.extend_from_slice(&step.index.to_le_bytes());
@@ -635,7 +639,7 @@ pub fn encode_steps(steps: &[TopologyFoldStep]) -> Result<Vec<u8>, CudaNovaError
 #[cfg(test)]
 mod tests {
     use super::{ENCODED_STEP_BYTES, encode_steps};
-    use zkfly_commitment::commit_topology_with_trace;
+    use topology_commitment::commit_topology_with_trace;
 
     /// Ensures the host layout remains a fixed-width projection of the shared
     /// commitment transcript.

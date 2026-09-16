@@ -12,7 +12,7 @@ use cuda_core::{CudaContext, DeviceBuffer, LaunchConfig};
 use cuda_device::{DisjointSlice, kernel, launch_bounds, thread};
 use cuda_host::cuda_module;
 use light_poseidon::parameters::bn254_x5::get_poseidon_parameters;
-use zkfly_commitment::{COMMITMENT_BYTES, POSEIDON_INPUTS, TOPOLOGY_DOMAIN, TopologyFoldStep};
+use topology_commitment::{COMMITMENT_BYTES, POSEIDON_INPUTS, TOPOLOGY_DOMAIN, TopologyFoldStep};
 
 use crate::{
     CudaNovaError, ENCODED_STEP_BYTES, ResidentValidationReport, ValidationReport, encode_steps,
@@ -224,35 +224,36 @@ mod kernels {
     ) {
         let index = thread::index_1d();
         let index_value = index.get();
-        let is_valid =
-            if let Some(base) = index_value.checked_mul(usize::try_from(step_size).unwrap_or(0)) {
-                let expected_index = u64::try_from(index_value).unwrap_or(u64::MAX);
-                let actual_index = read_u64_le(encoded, base + INDEX_OFFSET).unwrap_or(u64::MAX);
-                let mut is_valid = actual_index == expected_index;
-                is_valid = is_valid
-                    && has_expected_previous(
-                        encoded,
-                        base,
-                        index_value,
-                        usize::try_from(step_size).unwrap_or(0),
-                    );
-                if let Some(data_len) = encoded.get(base + DATA_LEN_OFFSET).copied() {
-                    is_valid = is_valid && usize::from(data_len) <= zkfly_commitment::POSEIDON_RATE;
-                    let mut field = usize::from(data_len);
-                    while field < zkfly_commitment::POSEIDON_RATE {
-                        let field_offset = field.checked_mul(32).unwrap_or(usize::MAX);
-                        is_valid = is_valid
-                            && bytes_are_zero(encoded, base + DATA_OFFSET + field_offset, 32);
-                        field = field.saturating_add(1);
-                    }
-                    is_valid = is_valid && bytes_are_zero(encoded, base + DATA_LEN_OFFSET + 1, 7);
-                } else {
-                    is_valid = false;
+        let is_valid = if let Some(base) =
+            index_value.checked_mul(usize::try_from(step_size).unwrap_or(0))
+        {
+            let expected_index = u64::try_from(index_value).unwrap_or(u64::MAX);
+            let actual_index = read_u64_le(encoded, base + INDEX_OFFSET).unwrap_or(u64::MAX);
+            let mut is_valid = actual_index == expected_index;
+            is_valid = is_valid
+                && has_expected_previous(
+                    encoded,
+                    base,
+                    index_value,
+                    usize::try_from(step_size).unwrap_or(0),
+                );
+            if let Some(data_len) = encoded.get(base + DATA_LEN_OFFSET).copied() {
+                is_valid = is_valid && usize::from(data_len) <= topology_commitment::POSEIDON_RATE;
+                let mut field = usize::from(data_len);
+                while field < topology_commitment::POSEIDON_RATE {
+                    let field_offset = field.checked_mul(32).unwrap_or(usize::MAX);
+                    is_valid =
+                        is_valid && bytes_are_zero(encoded, base + DATA_OFFSET + field_offset, 32);
+                    field = field.saturating_add(1);
                 }
-                is_valid
+                is_valid = is_valid && bytes_are_zero(encoded, base + DATA_LEN_OFFSET + 1, 7);
             } else {
-                false
-            };
+                is_valid = false;
+            }
+            is_valid
+        } else {
+            false
+        };
         let within_count = index_value < usize::try_from(step_count).unwrap_or(0);
         if let Some(destination) = valid.get_mut(index) {
             *destination = if within_count && is_valid {
@@ -455,9 +456,9 @@ mod kernels {
         let Some(data_len) = encoded.get(base + DATA_LEN_OFFSET).copied() else {
             return (false, [0_u64; 4]);
         };
-        is_valid = is_valid && usize::from(data_len) <= zkfly_commitment::POSEIDON_RATE;
+        is_valid = is_valid && usize::from(data_len) <= topology_commitment::POSEIDON_RATE;
         let mut field = usize::from(data_len);
-        while field < zkfly_commitment::POSEIDON_RATE {
+        while field < topology_commitment::POSEIDON_RATE {
             let Some(field_offset) = field.checked_mul(32) else {
                 return (false, [0_u64; 4]);
             };
@@ -1512,7 +1513,7 @@ fn duration_microseconds(duration: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zkfly_commitment::commit_topology_with_trace;
+    use topology_commitment::commit_topology_with_trace;
 
     /// Checks that the device Montgomery product agrees with arkworks on
     /// non-trivial and high-limb field elements.

@@ -1,9 +1,8 @@
 # cuda-nova
 
 This crate is the CUDA sidecar for the official `nova-snark` topology prover.
-It is kept inside `zkfly` while the API is measured, but its dependency and
-runtime boundary is designed for extraction into a standalone public
-repository.
+Its dependency and runtime boundary is designed for extraction into a
+standalone public repository.
 
 The current engine has three explicit stages:
 
@@ -12,8 +11,9 @@ The current engine has three explicit stages:
    BN254/Circom Poseidon transition on a CUDA device with cuda-oxide;
    `benchmark_steps` keeps the transcript buffers resident while repeating the
    shape kernel to expose steady-state cost;
-3. install Nova's arithmetic backend and call `zkfly-nova`, which uses the
-   official `nova-snark` R1CS synthesis and recursive folding implementation.
+3. install Nova's arithmetic backend and call the topology proof adapter, which
+   uses the official `nova-snark` R1CS synthesis and recursive folding
+   implementation.
    The engine also exposes `prove_weighted_forward` for the bounded CSR
 weighted-forward fixture: topology positions are fixed, while weights and
 vectors stay private and input/output Poseidon commitments are public.
@@ -62,8 +62,8 @@ still handles the registered arithmetic-heavy SpMV, cross-term, and fold
 paths, while Bellpepper synthesis, transcript orchestration, and MSM follow the
 documented host boundary.
 
-For callers that need commitments outside the recursive proof, the
-`zkfly-nova` crate exposes `VectorCommitmentBackend` and
+For callers that need commitments outside the recursive proof, the topology
+proof adapter exposes `VectorCommitmentBackend` and
 `HyperKzgVectorParameters`. The API supports dense vectors, canonical sparse
 matrix rows, and batch multilinear openings at a common point. It pads vectors
 to a power-of-two capacity and checks opening witnesses against their
@@ -82,3 +82,8 @@ For a reusable-parameter timing curve, run the same command with
 `--profile-forward` instead of `--prove`. It performs one setup and measures
 1, 2, 8, and 16 recursive weighted-forward steps using that parameter set,
 then proves a 12-neuron two-chunk commitment case.
+
+## License
+
+This crate is licensed under the GNU General Public License, version 3.0
+only. See [LICENSE](LICENSE) for the complete text.
