@@ -1,12 +1,12 @@
 //! CUDA sidecar for the official `nova-snark` topology prover.
 //!
 //! The crate is intentionally shaped as a future standalone repository. The
-//! CPU proof relation lives in [`zkfly_nova`], while this crate owns the CUDA
-//! context, PTX module, device buffers, and GPU preflight boundary. The first
-//! implementation validates the canonical fold transcript on the GPU and then
-//! delegates cryptographic Nova synthesis to the official CPU implementation.
-//! That explicit boundary prevents a GPU data-movement benchmark from being
-//! mistaken for a complete GPU Nova prover.
+//! official Nova proof relation lives in [`zkfly_nova`], while this crate owns
+//! the CUDA context, PTX module, device buffers, and arithmetic backend. Nova
+//! still constructs the Bellpepper circuit and controls the recursive protocol;
+//! arithmetic-heavy R1CS `SpMV`, NIFS cross-terms, and relaxed-witness folds can
+//! be dispatched to CUDA. MSM remains Nova's official provider with a CPU
+//! fallback. This keeps the protocol and transcript ABI unchanged.
 
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
@@ -14,8 +14,10 @@
 use std::path::Path;
 
 use thiserror::Error;
-use zkfly_commitment::{POSEIDON_RATE, TopologyFoldStep};
+use zkfly_commitment::{Commitment, POSEIDON_RATE, TopologyFoldStep};
 
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+mod cuda_backend;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 mod cuda_runtime;
 
@@ -64,6 +66,17 @@ pub struct ResidentValidationReport {
     pub download_microseconds: u64,
     /// End-to-end benchmark time, including encoding, in microseconds.
     pub end_to_end_microseconds: u64,
+}
+
+/// Counts successful Nova arithmetic operations dispatched to CUDA.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GpuBackendStats {
+    /// CSR matrix-vector launches used by Nova's R1CS relation.
+    pub spmv_calls: u64,
+    /// Vector fold launches used by Nova's relaxed witness updates.
+    pub fold_calls: u64,
+    /// Cross-term launches used by Nova's NIFS fold.
+    pub cross_term_calls: u64,
 }
 
 /// Errors returned by the CUDA sidecar engine.
@@ -144,7 +157,7 @@ pub enum CudaNovaError {
 pub struct CudaNovaEngine {
     /// Linux CUDA runtime and generated kernel module when the feature exists.
     #[cfg(all(feature = "cuda", target_os = "linux"))]
-    runtime: cuda_runtime::CudaRuntime,
+    runtime: std::sync::Arc<cuda_runtime::CudaRuntime>,
 }
 
 impl CudaNovaEngine {
@@ -165,9 +178,14 @@ impl CudaNovaEngine {
     {
         #[cfg(all(feature = "cuda", target_os = "linux"))]
         {
-            return Ok(Self {
-                runtime: cuda_runtime::CudaRuntime::new(device_ordinal, ptx_path.as_ref())?,
-            });
+            let runtime = std::sync::Arc::new(cuda_runtime::CudaRuntime::new(
+                device_ordinal,
+                ptx_path.as_ref(),
+            )?);
+            nova_snark::provider::gpu::install_gpu_backend(std::sync::Arc::new(
+                cuda_backend::CudaGpuBackend::new(runtime.clone()),
+            ));
+            return Ok(Self { runtime });
         }
 
         #[cfg(not(all(feature = "cuda", target_os = "linux")))]
@@ -208,9 +226,8 @@ impl CudaNovaEngine {
     /// In addition to the fixed transcript-shape predicates checked by
     /// [`Self::validate_steps`], this kernel performs the BN254 scalar-field
     /// permutation over canonical little-endian limbs and compares its digest
-    /// with each encoded `next` accumulator. It therefore establishes the
-    /// device-side hash relation; it still does not synthesize or fold a Nova
-    /// proof.
+    /// with each encoded `next` accumulator. It establishes the device-side
+    /// hash relation before the official Nova synthesis and fold.
     ///
     /// # Errors
     ///
@@ -266,10 +283,10 @@ impl CudaNovaEngine {
 
     /// GPU-preflights a transcript and then proves it with official Nova.
     ///
-    /// The method is deliberately honest about the current acceleration
-    /// boundary: device validation and transfer are CUDA-backed, while R1CS
-    /// synthesis, Poseidon witness arithmetic, and recursive folding are still
-    /// performed by [`zkfly_nova::TopologyNovaProof`].
+    /// Nova owns the complete Bellpepper R1CS synthesis and recursive protocol.
+    /// When CUDA is available, the vendored Nova arithmetic hooks dispatch
+    /// A/B/C `SpMV`, cross-term evaluation, and relaxed-witness vector folds to
+    /// this engine; MSM remains the official provider with a CPU fallback.
     ///
     /// # Errors
     ///
@@ -281,6 +298,121 @@ impl CudaNovaEngine {
         self.validate_poseidon_steps(steps)?;
         Ok(zkfly_nova::TopologyNovaProof::prove(steps)?)
     }
+
+    /// GPU-preflights a transcript and proves it against an external root.
+    ///
+    /// This is the preferred application boundary when the CSR topology root
+    /// is already a public instance. Nova still performs the complete R1CS
+    /// synthesis and recursive fold; this method only adds the root assertion
+    /// around that official proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns a CUDA sidecar error or a root/Nova proving error.
+    pub fn prove_for_root(
+        &self,
+        steps: &[TopologyFoldStep],
+        claimed_root: Commitment,
+    ) -> Result<zkfly_nova::TopologyNovaProof, CudaNovaError> {
+        self.validate_poseidon_steps(steps)?;
+        Ok(zkfly_nova::TopologyNovaProof::prove_for_root(
+            steps,
+            claimed_root,
+        )?)
+    }
+
+    /// Proves a sequence of private weighted forward passes for one fixed CSR
+    /// topology.
+    ///
+    /// The topology, input commitments, and output commitment are carried by
+    /// the official Nova circuit; edge weights and vectors remain private
+    /// witnesses. Once this engine is initialized, Nova's arithmetic backend
+    /// hooks route supported R1CS `SpMV`, relaxed-witness folds, and NIFS
+    /// cross-terms through the resident CUDA runtime. Bellpepper synthesis,
+    /// recursive orchestration, and MSM retain Nova's official CPU path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CudaNovaError::BackendUnavailable`] when this build does not
+    /// include the Linux CUDA sidecar, or the official Nova error when witness
+    /// chaining or circuit synthesis fails.
+    pub fn prove_weighted_forward(
+        &self,
+        topology: std::sync::Arc<zkfly_nova::CsrTopology>,
+        witnesses: &[zkfly_nova::WeightedForwardWitness],
+    ) -> Result<zkfly_nova::WeightedForwardProof, CudaNovaError> {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        {
+            let _ = &self.runtime;
+            return Ok(zkfly_nova::WeightedForwardProof::prove(
+                topology, witnesses,
+            )?);
+        }
+
+        #[cfg(not(all(feature = "cuda", target_os = "linux")))]
+        {
+            let _ = (topology, witnesses);
+            Err(CudaNovaError::BackendUnavailable)
+        }
+    }
+
+    /// Returns the successful CUDA arithmetic launches performed by this engine.
+    #[must_use]
+    pub fn gpu_backend_stats(&self) -> GpuBackendStats {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        {
+            let (spmv_calls, fold_calls, cross_term_calls) = self.runtime.backend_stats();
+            return GpuBackendStats {
+                spmv_calls,
+                fold_calls,
+                cross_term_calls,
+            };
+        }
+
+        #[cfg(not(all(feature = "cuda", target_os = "linux")))]
+        {
+            GpuBackendStats {
+                spmv_calls: 0,
+                fold_calls: 0,
+                cross_term_calls: 0,
+            }
+        }
+    }
+
+    /// Runs a deterministic check of Nova's official GPU MSM provider.
+    #[must_use]
+    pub fn gpu_msm_self_test(&self) -> bool {
+        #[cfg(all(
+            feature = "cuda",
+            feature = "gpu-msm",
+            target_os = "linux",
+            target_arch = "x86_64"
+        ))]
+        {
+            return cuda_backend::msm_self_test();
+        }
+
+        #[cfg(not(all(
+            feature = "cuda",
+            feature = "gpu-msm",
+            target_os = "linux",
+            target_arch = "x86_64"
+        )))]
+        {
+            false
+        }
+    }
+}
+
+/// Returns whether the optional official Blitzar MSM provider is compiled in.
+#[must_use]
+pub const fn gpu_msm_enabled() -> bool {
+    cfg!(all(
+        feature = "cuda",
+        feature = "gpu-msm",
+        target_os = "linux",
+        target_arch = "x86_64"
+    ))
 }
 
 /// Returns whether this build includes the Linux CUDA sidecar.

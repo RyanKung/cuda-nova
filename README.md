@@ -12,15 +12,20 @@ The current engine has three explicit stages:
    BN254/Circom Poseidon transition on a CUDA device with cuda-oxide;
    `benchmark_steps` keeps the transcript buffers resident while repeating the
    shape kernel to expose steady-state cost;
-3. delegate R1CS synthesis and recursive folding to `zkfly-nova`, which uses
-   the official `nova-snark` crate.
+3. install Nova's arithmetic backend and call `zkfly-nova`, which uses the
+   official `nova-snark` R1CS synthesis and recursive folding implementation.
+   The engine also exposes `prove_weighted_forward` for the bounded CSR
+   weighted-forward fixture: topology positions are fixed, while weights and
+   vectors stay private and input/output Poseidon commitments are public.
 
-The third stage is still host-side. The GPU Poseidon path now uses an exact
-eight-word, 32-bit-radix CIOS Montgomery product. It is a first performance
-baseline rather than a final field/MSM engine: the fixed two-step V100 smoke
-fixture measured about 323.6 ms for the Poseidon kernel. A future GPU
-field/MSM engine can replace that implementation without changing the
-transcript ABI or the public `CudaNovaEngine` boundary.
+Bellpepper constraint construction, Nova transcript control, and MSM remain
+host-orchestrated. During the official Nova proof, the patched backend sends
+the arithmetic-heavy A/B/C CSR SpMV, NIFS cross-term, and relaxed-witness vector
+folds to CUDA. MSM uses Nova's normal CPU implementation by default; passing
+the explicit `gpu-msm` feature enables the official Linux Blitzar provider,
+with the CPU implementation still available as a fallback. No custom MSM
+protocol is introduced. The GPU Poseidon path uses an exact eight-word,
+32-bit-radix CIOS Montgomery product.
 
 On the V100, generate the PTX and run the two-step smoke fixture with:
 
@@ -28,10 +33,13 @@ On the V100, generate the PTX and run the two-step smoke fixture with:
 export PATH=/usr/local/cuda/bin:$PATH
 export CUDA_TOOLKIT_PATH=/usr/local/cuda
 CUDA_OXIDE_TARGET=sm_70 cargo oxide run \
-  --features cuda --arch sm_70 --bin cuda-nova -- --prove
+  --features cuda,gpu-msm --arch sm_70 --bin cuda-nova -- --prove
 ```
 
 The output includes upload, repeated-kernel, download, and end-to-end
-microsecond measurements, plus a Poseidon preflight timing. The numbers are a
-smoke baseline, not a full MaleCNS proof benchmark; Nova R1CS synthesis,
-recursive folding, and MSMs remain outside this GPU preflight.
+microsecond measurements, plus a Poseidon preflight timing. With `--prove` it
+also verifies the complete official Nova proof and reports the CUDA arithmetic
+launch counters. The fixed two-step topology and weighted-forward runs are
+smoke baselines, not a full MaleCNS proof benchmark. The weighted-forward
+fixture currently accepts at most eleven neurons because its vector commitment
+fits one Poseidon rate.

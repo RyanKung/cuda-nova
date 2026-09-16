@@ -1,17 +1,22 @@
 //! V100 smoke runner for the `cuda-nova` sidecar.
 
+use std::{sync::Arc, time::Instant};
+
 use cuda_nova::{CudaNovaEngine, CudaNovaError};
-use zkfly_commitment::commit_topology_with_trace;
+use halo2curves::bn256::Fr;
+use halo2curves::ff::Field;
+use zkfly_commitment::{Commitment, TopologyFoldStep, commit_topology_with_trace};
+use zkfly_nova::{CsrTopology, WeightedForwardWitness};
 
 /// Generates a two-step canonical transcript and validates it on CUDA.
 fn main() -> Result<(), CudaNovaError> {
-    let run_proof = std::env::args()
+    let should_prove = std::env::args()
         .skip(1)
         .any(|argument| argument == "--prove");
     let row_offsets: Vec<u32> = (0_u32..=50).collect();
     let column_indices: Vec<u32> = (0_u32..50).collect();
     let mut steps = Vec::new();
-    let _root = commit_topology_with_trace(50, &row_offsets, &column_indices, |step| {
+    let root = commit_topology_with_trace(50, &row_offsets, &column_indices, |step| {
         steps.push(step);
     })?;
     let engine = CudaNovaEngine::new(0, "cuda_nova.ptx")?;
@@ -77,14 +82,88 @@ fn main() -> Result<(), CudaNovaError> {
             });
         }
     }
-    if run_proof {
-        let proof = engine.prove(&steps)?;
-        if !proof.verify()? {
-            return Err(CudaNovaError::Nova(
-                zkfly_nova::TopologyNovaError::InvalidFinalState,
-            ));
-        }
-        println!("official Nova proof path passed: {} step(s)", proof.steps());
+    if should_prove {
+        run_proof(&engine, &steps, root)?;
+        run_weighted_forward(&engine)?;
     }
+    Ok(())
+}
+
+/// Proves and verifies the smoke transcript with official Nova.
+fn run_proof(
+    engine: &CudaNovaEngine,
+    steps: &[TopologyFoldStep],
+    claimed_root: Commitment,
+) -> Result<(), CudaNovaError> {
+    let proof_start = Instant::now();
+    let proof = engine.prove_for_root(steps, claimed_root)?;
+    let proof_microseconds = proof_start.elapsed().as_micros();
+    if !proof.verify_against_root(claimed_root)? {
+        return Err(CudaNovaError::Nova(
+            zkfly_nova::TopologyNovaError::InvalidFinalState,
+        ));
+    }
+    println!(
+        "official Nova proof path passed: {} step(s), prove={}us",
+        proof.steps(),
+        proof_microseconds
+    );
+    let stats = engine.gpu_backend_stats();
+    println!(
+        "cuda-nova arithmetic backend passed: spmv={} fold={} cross_term={}",
+        stats.spmv_calls, stats.fold_calls, stats.cross_term_calls
+    );
+    if cuda_nova::gpu_msm_enabled() {
+        if !engine.gpu_msm_self_test() {
+            return Err(CudaNovaError::InvalidTranscript {
+                proposition: "the official Nova MSM provider agrees with the CPU reference",
+            });
+        }
+        println!("official Nova GPU MSM path passed");
+    } else {
+        println!("official Nova CPU MSM path active");
+    }
+    Ok(())
+}
+
+/// Proves two private weighted forward passes over a fixed three-neuron CSR
+/// topology and checks the public topology/input/output commitments.
+fn run_weighted_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
+    let topology = Arc::new(CsrTopology::new(3, &[0, 2, 3, 4], &[0, 2, 1, 0])?);
+    let weights = vec![Fr::from(2_u64), -Fr::ONE, Fr::from(3_u64), Fr::from(4_u64)];
+    let first = WeightedForwardWitness::new(
+        &topology,
+        &[Fr::ONE, Fr::from(2_u64), Fr::from(5_u64)],
+        &weights,
+    )?;
+    let second = WeightedForwardWitness::new(
+        &topology,
+        &[-Fr::from(3_u64), Fr::from(6_u64), Fr::from(4_u64)],
+        &weights,
+    )?;
+    let proof_start = Instant::now();
+    let proof =
+        engine.prove_weighted_forward(topology.clone(), &[first.clone(), second.clone()])?;
+    let proof_microseconds = proof_start.elapsed().as_micros();
+    if !proof.verify_against(
+        topology.root(),
+        first.input_commitment(),
+        second.output_commitment(),
+    )? {
+        return Err(CudaNovaError::Nova(
+            zkfly_nova::TopologyNovaError::InvalidFinalState,
+        ));
+    }
+    let stats = engine.gpu_backend_stats();
+    println!(
+        "weighted-forward Nova proof passed: {} step(s), prove={}us constraints={} variables={} spmv={} fold={} cross_term={}",
+        proof.steps(),
+        proof_microseconds,
+        proof.primary_constraints(),
+        proof.primary_variables(),
+        stats.spmv_calls,
+        stats.fold_calls,
+        stats.cross_term_calls
+    );
     Ok(())
 }

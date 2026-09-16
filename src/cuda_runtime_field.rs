@@ -85,7 +85,25 @@ fn add_word(mut accumulator: [u64; 17], index: usize, value: u64) -> [u64; 17] {
 /// compiler can lower every inner step to ordinary exact `u64` arithmetic
 /// without a software 128-bit helper.
 pub(super) fn montgomery_mul(left: FieldLimbs, right: FieldLimbs) -> FieldLimbs {
-    let modulus = device_field_modulus();
+    montgomery_mul_with_config(
+        left,
+        right,
+        device_field_modulus(),
+        MONTGOMERY_MODULUS_INVERSE_WORD,
+    )
+}
+
+/// Computes one Montgomery product using a caller-supplied field configuration.
+///
+/// Nova's primary and secondary curves use different 254-bit scalar moduli.
+/// Keeping the reduction parameters explicit lets the same PTX serve both
+/// sides of the cycle without changing the transcript ABI.
+fn montgomery_mul_with_config(
+    left: FieldLimbs,
+    right: FieldLimbs,
+    modulus: FieldLimbs,
+    modulus_inverse_word: u32,
+) -> FieldLimbs {
     let left_words = split_words(left);
     let right_words = split_words(right);
     let modulus_words = split_words(modulus);
@@ -108,7 +126,7 @@ pub(super) fn montgomery_mul(left: FieldLimbs, right: FieldLimbs) -> FieldLimbs 
 
         let reduction = low_word(
             ((product[outer] ^ WORD_TAG) & 0xffff_ffff_u64)
-                * u64::from(MONTGOMERY_MODULUS_INVERSE_WORD),
+                * u64::from(modulus_inverse_word),
         );
         carry = 0;
         inner = 0;
@@ -178,7 +196,31 @@ fn to_montgomery(value: FieldLimbs) -> FieldLimbs {
     montgomery_mul(value, device_montgomery_r2())
 }
 
+/// Converts a canonical field element using caller-supplied Montgomery data.
+pub(super) fn to_montgomery_with_config(
+    value: FieldLimbs,
+    modulus: FieldLimbs,
+    modulus_inverse_word: u32,
+    montgomery_r2: FieldLimbs,
+) -> FieldLimbs {
+    montgomery_mul_with_config(value, montgomery_r2, modulus, modulus_inverse_word)
+}
+
 /// Converts a Montgomery field element back to ordinary canonical form.
 fn from_montgomery(value: FieldLimbs) -> FieldLimbs {
     montgomery_mul(value, [1_u64, 0, 0, 0])
+}
+
+/// Converts a Montgomery field element using caller-supplied reduction data.
+pub(super) fn from_montgomery_with_config(
+    value: FieldLimbs,
+    modulus: FieldLimbs,
+    modulus_inverse_word: u32,
+) -> FieldLimbs {
+    montgomery_mul_with_config(
+        value,
+        [1_u64, 0, 0, 0],
+        modulus,
+        modulus_inverse_word,
+    )
 }

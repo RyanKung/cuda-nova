@@ -8,21 +8,32 @@ description = "CUDA sidecar engine for topology-bound official Nova proofs"
 
 [features]
 default = []
-cuda = ["dep:cuda-core", "dep:cuda-device", "dep:cuda-host"]
+cuda = [
+    "dep:cuda-core",
+    "dep:cuda-device",
+    "dep:cuda-host",
+]
+gpu-msm = ["zkfly-nova/gpu-msm"]
 
 [dependencies]
 ark-bn254.workspace = true
 ark-ff.workspace = true
 light-poseidon.workspace = true
+halo2curves.workspace = true
 nova-snark.workspace = true
 thiserror.workspace = true
 zkfly-commitment = { path = "../zkfly-commitment" }
-zkfly-nova = { path = "../zkfly-nova" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
 cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
 cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies.zkfly-nova]
+path = "../zkfly-nova"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies.zkfly-nova]
+path = "../zkfly-nova"
 
 [lints]
 workspace = true
