@@ -11,6 +11,9 @@ default = []
 cuda = ["dep:cuda-core", "dep:cuda-device", "dep:cuda-host"]
 
 [dependencies]
+ark-bn254.workspace = true
+ark-ff.workspace = true
+light-poseidon.workspace = true
 nova-snark.workspace = true
 thiserror.workspace = true
 zkfly-commitment = { path = "../zkfly-commitment" }

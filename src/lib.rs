@@ -85,11 +85,28 @@ pub enum CudaNovaError {
         /// Structural proposition that failed.
         proposition: &'static str,
     },
+    /// The host could not prepare the canonical Poseidon parameter table.
+    #[error("Poseidon parameters could not be prepared: {message}")]
+    PoseidonParameters {
+        /// Parameter preparation detail.
+        message: String,
+    },
     /// A device lane rejected one encoded transition.
     #[error("CUDA transcript preflight rejected transition {index}")]
     GpuValidationFailed {
         /// Zero-based transition index reported by the device.
         index: usize,
+    },
+    /// The device computed a digest that differs from the transcript's
+    /// claimed `next` accumulator.
+    #[error("CUDA Poseidon digest mismatch at transition {index}")]
+    GpuPoseidonMismatch {
+        /// Zero-based transition index reported by the device.
+        index: usize,
+        /// Digest claimed by the encoded transcript.
+        expected: [u8; 32],
+        /// Digest computed by the device.
+        actual: [u8; 32],
     },
     /// This target was built without the Linux CUDA sidecar.
     #[error("CUDA Nova sidecar is unavailable in this build or on this host")]
@@ -186,6 +203,36 @@ impl CudaNovaEngine {
         }
     }
 
+    /// Validates the complete Poseidon transition on the selected CUDA device.
+    ///
+    /// In addition to the fixed transcript-shape predicates checked by
+    /// [`Self::validate_steps`], this kernel performs the BN254 scalar-field
+    /// permutation over canonical little-endian limbs and compares its digest
+    /// with each encoded `next` accumulator. It therefore establishes the
+    /// device-side hash relation; it still does not synthesize or fold a Nova
+    /// proof.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the trace is malformed, a device lane rejects a
+    /// transition or digest, Poseidon parameters cannot be prepared, or CUDA
+    /// is unavailable in this build.
+    pub fn validate_poseidon_steps(
+        &self,
+        steps: &[TopologyFoldStep],
+    ) -> Result<ValidationReport, CudaNovaError> {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        {
+            return self.runtime.validate_poseidon_steps(steps);
+        }
+
+        #[cfg(not(all(feature = "cuda", target_os = "linux")))]
+        {
+            let _ = steps;
+            Err(CudaNovaError::BackendUnavailable)
+        }
+    }
+
     /// Repeatedly validates one transcript while keeping device buffers
     /// resident for the whole benchmark.
     ///
@@ -231,7 +278,7 @@ impl CudaNovaEngine {
         &self,
         steps: &[TopologyFoldStep],
     ) -> Result<zkfly_nova::TopologyNovaProof, CudaNovaError> {
-        self.validate_steps(steps)?;
+        self.validate_poseidon_steps(steps)?;
         Ok(zkfly_nova::TopologyNovaProof::prove(steps)?)
     }
 }

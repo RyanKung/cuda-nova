@@ -26,6 +26,15 @@ fn main() -> Result<(), CudaNovaError> {
         report.download_microseconds,
         report.end_to_end_microseconds
     );
+    let poseidon_report = engine.validate_poseidon_steps(&steps)?;
+    println!(
+        "cuda-nova Poseidon preflight passed: {} step(s), upload={}us kernel={}us download={}us end_to_end={}us",
+        poseidon_report.steps,
+        poseidon_report.upload_microseconds,
+        poseidon_report.kernel_microseconds,
+        poseidon_report.download_microseconds,
+        poseidon_report.end_to_end_microseconds
+    );
     let mut invalid_steps = steps.clone();
     if let Some(step) = invalid_steps.first_mut() {
         step.index = 1;
