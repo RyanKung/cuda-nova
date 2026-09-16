@@ -15,8 +15,11 @@ The current engine has three explicit stages:
 3. install Nova's arithmetic backend and call `zkfly-nova`, which uses the
    official `nova-snark` R1CS synthesis and recursive folding implementation.
    The engine also exposes `prove_weighted_forward` for the bounded CSR
-   weighted-forward fixture: topology positions are fixed, while weights and
-   vectors stay private and input/output Poseidon commitments are public.
+weighted-forward fixture: topology positions are fixed, while weights and
+vectors stay private and input/output Poseidon commitments are public.
+`setup_weighted_forward` plus
+`prove_weighted_forward_with_parameters` lets callers reuse Nova setup across
+multiple proofs with the same topology and circuit shape.
 
 Bellpepper constraint construction, Nova transcript control, and MSM remain
 host-orchestrated. During the official Nova proof, the patched backend sends
