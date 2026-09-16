@@ -15,11 +15,12 @@ The current engine has three explicit stages:
 3. delegate R1CS synthesis and recursive folding to `zkfly-nova`, which uses
    the official `nova-snark` crate.
 
-The third stage is still host-side. The current GPU Poseidon path is a
-correctness baseline using canonical-limb double-and-add multiplication; its
-timings are not a field-arithmetic performance claim. A future GPU field/MSM
-engine can replace that implementation without changing the transcript ABI or
-the public `CudaNovaEngine` boundary.
+The third stage is still host-side. The GPU Poseidon path now uses an exact
+eight-word, 32-bit-radix CIOS Montgomery product. It is a first performance
+baseline rather than a final field/MSM engine: the fixed two-step V100 smoke
+fixture measured about 323.6 ms for the Poseidon kernel. A future GPU
+field/MSM engine can replace that implementation without changing the
+transcript ABI or the public `CudaNovaEngine` boundary.
 
 On the V100, generate the PTX and run the two-step smoke fixture with:
 
@@ -32,5 +33,5 @@ CUDA_OXIDE_TARGET=sm_70 cargo oxide run \
 
 The output includes upload, repeated-kernel, download, and end-to-end
 microsecond measurements, plus a Poseidon preflight timing. The numbers are a
-smoke baseline, not a full MaleCNS proof benchmark; the Poseidon timing is
-especially a correctness baseline until the wide-product kernel is validated.
+smoke baseline, not a full MaleCNS proof benchmark; Nova R1CS synthesis,
+recursive folding, and MSMs remain outside this GPU preflight.

@@ -59,7 +59,19 @@ const FIELD_MODULUS_3: u64 = 0x3064_4e72_e131_a029;
 /// A BN254 scalar represented as four little-endian 64-bit limbs.
 type FieldLimbs = [u64; 4];
 
-/// Host-side Poseidon constants converted to the GPU's canonical limb form.
+/// Least-significant limb of `R mod p`, the Montgomery representation of one.
+const MONTGOMERY_ONE_0: u64 = 0xac96_341c_4fff_fffb;
+
+/// Second limb of `R mod p`.
+const MONTGOMERY_ONE_1: u64 = 0x36fc_7695_9f60_cd29;
+
+/// Third limb of `R mod p`.
+const MONTGOMERY_ONE_2: u64 = 0x666e_a36f_7879_462e;
+
+/// Most-significant limb of `R mod p`.
+const MONTGOMERY_ONE_3: u64 = 0x0e0a_77c1_9a07_df2f;
+
+/// Host-side Poseidon constants converted to the GPU's Montgomery limb form.
 struct PoseidonHostParameters {
     /// Flattened round constants in round-major order.
     ark: Vec<FieldLimbs>,
@@ -69,7 +81,7 @@ struct PoseidonHostParameters {
     full_rounds: u32,
     /// Number of partial S-box rounds in the fixed permutation.
     partial_rounds: u32,
-    /// Canonical little-endian limb representation of the topology domain.
+    /// Montgomery-limb representation of the topology domain.
     domain: FieldLimbs,
 }
 
@@ -87,7 +99,7 @@ pub(crate) struct CudaRuntime {
     poseidon_full_rounds: u32,
     /// Number of partial S-box rounds in the device permutation.
     poseidon_partial_rounds: u32,
-    /// Canonical-limb topology domain separator.
+    /// Montgomery-limb topology domain separator.
     poseidon_domain: FieldLimbs,
     /// Serializes context binding and buffer teardown for this MVP.
     execution_lock: Mutex<()>,
@@ -106,6 +118,10 @@ mod kernels {
             FIELD_MODULUS_3,
         ]
     }
+
+    // Keep the arithmetic implementation separate from the transcript
+    // kernels so each source file remains small and independently reviewable.
+    include!("cuda_runtime_field.rs");
 
     /// Checks the canonical fixed-width transcript shape one transition per
     /// CUDA lane, including the adjacency relation between neighboring steps.
@@ -242,7 +258,7 @@ mod kernels {
         };
         let mut state = [[0_u64; 4]; 13];
         state[0] = domain;
-        state[1] = previous;
+        state[1] = to_montgomery(previous);
         let mut position = 0_usize;
         while position < POSEIDON_RATE_DEVICE {
             let Some(field_offset) = position.checked_mul(32) else {
@@ -251,13 +267,13 @@ mod kernels {
             let Some(value) = read_field(encoded, base + DATA_OFFSET + field_offset) else {
                 return (false, [0_u64; 4]);
             };
-            state[position + 2] = value;
+            state[position + 2] = to_montgomery(value);
             position = position.saturating_add(1);
         }
         if !poseidon_permutation(&mut state, ark, mds, full_rounds, partial_rounds) {
             return (false, [0_u64; 4]);
         }
-        let digest = state[0];
+        let digest = from_montgomery(state[0]);
         (
             field_equals_bytes(encoded, base + NEXT_OFFSET, digest),
             digest,
@@ -328,7 +344,7 @@ mod kernels {
                 let Some(coefficient) = mds.get(row_start + column).copied() else {
                     return false;
                 };
-                sum = field_add(sum, field_mul_slow(coefficient, sboxed[column]));
+                sum = field_add(sum, montgomery_mul(coefficient, sboxed[column]));
                 column = column.saturating_add(1);
             }
             next[row] = sum;
@@ -340,12 +356,12 @@ mod kernels {
 
     /// Computes x^5 using two squarings and one multiplication.
     fn field_pow5(value: FieldLimbs) -> FieldLimbs {
-        let square = field_mul_slow(value, value);
-        let fourth = field_mul_slow(square, square);
-        field_mul_slow(fourth, value)
+        let square = montgomery_mul(value, value);
+        let fourth = montgomery_mul(square, square);
+        montgomery_mul(fourth, value)
     }
 
-    /// Adds two canonical BN254 field elements modulo the scalar modulus.
+    /// Adds two Montgomery-encoded BN254 residues modulo the scalar modulus.
     fn field_add(left: FieldLimbs, right: FieldLimbs) -> FieldLimbs {
         let mut result = [0_u64; 4];
         let mut carry = 0_u64;
@@ -391,30 +407,6 @@ mod kernels {
             }
         }
         false
-    }
-
-    /// Multiplies canonical field elements with a correctness-first
-    /// double-and-add schedule.
-    ///
-    /// This deliberately simple baseline avoids relying on device compiler
-    /// carry lowering while the optimized wide-product implementation is
-    /// validated. It is correct but not a performance target.
-    pub(super) fn field_mul_slow(left: FieldLimbs, right: FieldLimbs) -> FieldLimbs {
-        let mut result = [0_u64; 4];
-        let mut base = left;
-        let mut limb = 0_usize;
-        while limb < FIELD_LIMBS {
-            let mut bit = 0_u32;
-            while bit < 64 {
-                if ((right[limb] >> bit) & 1_u64) != 0 {
-                    result = field_add(result, base);
-                }
-                base = field_add(base, base);
-                bit = bit.saturating_add(1);
-            }
-            limb = limb.saturating_add(1);
-        }
-        result
     }
 
     /// Decodes one canonical ordinary field element from the transcript.
@@ -755,7 +747,7 @@ fn prepare_poseidon_parameters() -> Result<PoseidonHostParameters, CudaNovaError
         .ark
         .iter()
         .copied()
-        .map(field_to_limbs)
+        .map(field_to_montgomery)
         .collect::<Result<Vec<_>, _>>()?;
     let mds_rows_are_valid = raw.mds.iter().all(|row| row.len() == expected_width);
     if raw.mds.len() != expected_width || !mds_rows_are_valid {
@@ -767,7 +759,7 @@ fn prepare_poseidon_parameters() -> Result<PoseidonHostParameters, CudaNovaError
         .mds
         .iter()
         .flat_map(|row| row.iter().copied())
-        .map(field_to_limbs)
+        .map(field_to_montgomery)
         .collect::<Result<Vec<_>, _>>()?;
     let full_rounds =
         u32::try_from(raw.full_rounds).map_err(|_| CudaNovaError::PoseidonParameters {
@@ -777,7 +769,7 @@ fn prepare_poseidon_parameters() -> Result<PoseidonHostParameters, CudaNovaError
         u32::try_from(raw.partial_rounds).map_err(|_| CudaNovaError::PoseidonParameters {
             message: "partial round count does not fit the device ABI".to_owned(),
         })?;
-    let domain = field_to_limbs(Fr::from_le_bytes_mod_order(TOPOLOGY_DOMAIN))?;
+    let domain = field_to_montgomery(Fr::from_le_bytes_mod_order(TOPOLOGY_DOMAIN))?;
     Ok(PoseidonHostParameters {
         ark,
         mds,
@@ -812,6 +804,17 @@ fn field_to_limbs(value: Fr) -> Result<FieldLimbs, CudaNovaError> {
         *limb = u64::from_le_bytes(chunk);
     }
     Ok(limbs)
+}
+
+/// Converts an arkworks scalar into the GPU's Montgomery limb form.
+fn field_to_montgomery(value: Fr) -> Result<FieldLimbs, CudaNovaError> {
+    let r = Fr::from_le_bytes_mod_order(&limbs_to_bytes([
+        MONTGOMERY_ONE_0,
+        MONTGOMERY_ONE_1,
+        MONTGOMERY_ONE_2,
+        MONTGOMERY_ONE_3,
+    ]));
+    field_to_limbs(value * r)
 }
 
 /// Returns the first device lane that did not accept the transcript.
@@ -872,17 +875,25 @@ mod tests {
     use super::*;
     use zkfly_commitment::commit_topology_with_trace;
 
-    /// Checks that the device field product agrees with arkworks on a
-    /// non-trivial pair of field elements.
+    /// Checks that the device Montgomery product agrees with arkworks on
+    /// non-trivial and high-limb field elements.
     #[test]
     fn field_product_matches_arkworks() {
-        let left = Fr::from(17_u64);
-        let right = Fr::from(29_u64);
-        let left_limbs = field_to_limbs(left).unwrap_or([0; 4]);
-        let right_limbs = field_to_limbs(right).unwrap_or([0; 4]);
-        let actual = kernels::field_mul_slow(left_limbs, right_limbs);
-        let expected = field_to_limbs(left * right).unwrap_or([0; 4]);
-        assert_eq!(actual, expected);
+        let cases = [
+            (Fr::from(17_u64), Fr::from(29_u64)),
+            (
+                Fr::from_le_bytes_mod_order(&[0xff_u8; COMMITMENT_BYTES]),
+                Fr::from_le_bytes_mod_order(&[0xa5_u8; COMMITMENT_BYTES]),
+            ),
+        ];
+        for (left, right) in cases {
+            let left_montgomery = field_to_montgomery(left).unwrap_or([0; 4]);
+            let right_montgomery = field_to_montgomery(right).unwrap_or([0; 4]);
+            let product_montgomery = kernels::montgomery_mul(left_montgomery, right_montgomery);
+            let product = kernels::montgomery_mul(product_montgomery, [1_u64, 0, 0, 0]);
+            let expected = field_to_limbs(left * right).unwrap_or([0; 4]);
+            assert_eq!(product, expected);
+        }
     }
 
     /// Checks the host execution of the exact device permutation against the
@@ -905,10 +916,10 @@ mod tests {
         let mut state = [[0_u64; 4]; 13];
         state[0] = parameters.domain;
         let previous = Fr::from_le_bytes_mod_order(&step.previous);
-        state[1] = field_to_limbs(previous).unwrap_or([0; 4]);
+        state[1] = field_to_montgomery(previous).unwrap_or([0; 4]);
         for (position, bytes) in step.data.iter().enumerate() {
             let value = Fr::from_le_bytes_mod_order(bytes);
-            state[position + 2] = field_to_limbs(value).unwrap_or([0; 4]);
+            state[position + 2] = field_to_montgomery(value).unwrap_or([0; 4]);
         }
         let computed = kernels::poseidon_permutation(
             &mut state,
@@ -918,7 +929,7 @@ mod tests {
             parameters.partial_rounds,
         );
         assert!(computed);
-        let digest = state[0];
+        let digest = kernels::montgomery_mul(state[0], [1_u64, 0, 0, 0]);
         assert_eq!(limbs_to_bytes(digest), step.next);
     }
 }
