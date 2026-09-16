@@ -1,6 +1,10 @@
 //! V100 smoke runner for the `cuda-nova` sidecar.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use cuda_nova::{CudaNovaEngine, CudaNovaError};
 use halo2curves::bn256::Fr;
@@ -16,6 +20,7 @@ fn main() -> Result<(), CudaNovaError> {
     let profile_forward = std::env::args()
         .skip(1)
         .any(|argument| argument == "--profile-forward");
+    let ptau_dir = ptau_dir_from_args();
     let row_offsets: Vec<u32> = (0_u32..=50).collect();
     let column_indices: Vec<u32> = (0_u32..50).collect();
     let mut steps = Vec::new();
@@ -86,11 +91,11 @@ fn main() -> Result<(), CudaNovaError> {
         }
     }
     if should_prove {
-        run_proof(&engine, &steps, root)?;
-        run_weighted_forward(&engine)?;
+        run_proof(&engine, &steps, root, ptau_dir.as_deref())?;
+        run_weighted_forward(&engine, ptau_dir.as_deref())?;
     }
     if profile_forward {
-        run_forward_profile(&engine)?;
+        run_forward_profile(&engine, ptau_dir.as_deref())?;
     }
     Ok(())
 }
@@ -100,8 +105,15 @@ fn run_proof(
     engine: &CudaNovaEngine,
     steps: &[TopologyFoldStep],
     claimed_root: Commitment,
+    ptau_dir: Option<&Path>,
 ) -> Result<(), CudaNovaError> {
+    #[cfg(not(feature = "hyperkzg"))]
+    let _ = ptau_dir;
     let proof_start = Instant::now();
+    #[cfg(feature = "hyperkzg")]
+    let proof =
+        engine.prove_for_root_with_ptau_dir(steps, claimed_root, required_ptau_dir(ptau_dir)?)?;
+    #[cfg(not(feature = "hyperkzg"))]
     let proof = engine.prove_for_root(steps, claimed_root)?;
     let proof_microseconds = proof_start.elapsed().as_micros();
     if !proof.verify_against_root(claimed_root)? {
@@ -134,7 +146,12 @@ fn run_proof(
 
 /// Proves two private weighted forward passes over a fixed three-neuron CSR
 /// topology and checks the public topology/input/output commitments.
-fn run_weighted_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
+fn run_weighted_forward(
+    engine: &CudaNovaEngine,
+    ptau_dir: Option<&Path>,
+) -> Result<(), CudaNovaError> {
+    #[cfg(not(feature = "hyperkzg"))]
+    let _ = ptau_dir;
     let topology = Arc::new(CsrTopology::new(3, &[0, 2, 3, 4], &[0, 2, 1, 0])?);
     let weights = vec![Fr::from(2_u64), -Fr::ONE, Fr::from(3_u64), Fr::from(4_u64)];
     let first = WeightedForwardWitness::new(
@@ -148,6 +165,13 @@ fn run_weighted_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
         &weights,
     )?;
     let setup_start = Instant::now();
+    #[cfg(feature = "hyperkzg")]
+    let parameters = engine.setup_weighted_forward_with_ptau_dir(
+        topology.clone(),
+        &first,
+        required_ptau_dir(ptau_dir)?,
+    )?;
+    #[cfg(not(feature = "hyperkzg"))]
     let parameters = engine.setup_weighted_forward(topology.clone(), &first)?;
     let setup_microseconds = setup_start.elapsed().as_micros();
     let proof_start = Instant::now();
@@ -179,12 +203,24 @@ fn run_weighted_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
 }
 
 /// Measures reusable weighted-forward proving over several recursive lengths.
-fn run_forward_profile(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
+fn run_forward_profile(
+    engine: &CudaNovaEngine,
+    ptau_dir: Option<&Path>,
+) -> Result<(), CudaNovaError> {
+    #[cfg(not(feature = "hyperkzg"))]
+    let _ = ptau_dir;
     let (topology, witnesses) = forward_fixture(16)?;
     let first = witnesses.first().ok_or(CudaNovaError::InvalidTranscript {
         proposition: "the forward profile fixture has a first witness",
     })?;
     let setup_start = Instant::now();
+    #[cfg(feature = "hyperkzg")]
+    let parameters = engine.setup_weighted_forward_with_ptau_dir(
+        topology.clone(),
+        first,
+        required_ptau_dir(ptau_dir)?,
+    )?;
+    #[cfg(not(feature = "hyperkzg"))]
     let parameters = engine.setup_weighted_forward(topology.clone(), first)?;
     let setup_microseconds = setup_start.elapsed().as_micros();
     println!(
@@ -229,12 +265,17 @@ fn run_forward_profile(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
             verify_microseconds
         );
     }
-    run_chunked_forward(engine)?;
+    run_chunked_forward(engine, ptau_dir)?;
     Ok(())
 }
 
 /// Proves one twelve-neuron identity pass to exercise a second Poseidon chunk.
-fn run_chunked_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
+fn run_chunked_forward(
+    engine: &CudaNovaEngine,
+    ptau_dir: Option<&Path>,
+) -> Result<(), CudaNovaError> {
+    #[cfg(not(feature = "hyperkzg"))]
+    let _ = ptau_dir;
     let row_offsets = (0_u32..=12).collect::<Vec<_>>();
     let column_indices = (0_u32..12).collect::<Vec<_>>();
     let topology = Arc::new(CsrTopology::new(12, &row_offsets, &column_indices)?);
@@ -242,6 +283,13 @@ fn run_chunked_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
     let weights = vec![Fr::ONE; 12];
     let first = WeightedForwardWitness::new(&topology, &input, &weights)?;
     let setup_start = Instant::now();
+    #[cfg(feature = "hyperkzg")]
+    let parameters = engine.setup_weighted_forward_with_ptau_dir(
+        topology.clone(),
+        &first,
+        required_ptau_dir(ptau_dir)?,
+    )?;
+    #[cfg(not(feature = "hyperkzg"))]
     let parameters = engine.setup_weighted_forward(topology.clone(), &first)?;
     let setup_microseconds = setup_start.elapsed().as_micros();
     let prove_start = Instant::now();
@@ -269,6 +317,29 @@ fn run_chunked_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
         parameters.primary_variables()
     );
     Ok(())
+}
+
+/// Extracts the optional trusted `HyperKZG` setup directory from command-line
+/// arguments in either `--ptau-dir PATH` or `--ptau-dir=PATH` form.
+fn ptau_dir_from_args() -> Option<PathBuf> {
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--ptau-dir" {
+            return arguments.next().map(PathBuf::from);
+        }
+        if let Some(path) = argument.strip_prefix("--ptau-dir=") {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
+/// Requires a trusted Powers-of-Tau directory for a `HyperKZG` build.
+#[cfg(feature = "hyperkzg")]
+fn required_ptau_dir(ptau_dir: Option<&Path>) -> Result<&Path, CudaNovaError> {
+    ptau_dir.ok_or(CudaNovaError::Nova(
+        zkfly_nova::TopologyNovaError::HyperKzgSetupRequired,
+    ))
 }
 
 /// Builds a deterministic chain of private forward witnesses for profiling.

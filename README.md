@@ -21,6 +21,15 @@ vectors stay private and input/output Poseidon commitments are public.
 `prove_weighted_forward_with_parameters` lets callers reuse Nova setup across
 multiple proofs with the same topology and circuit shape.
 
+The default build uses Nova's BN254 Pedersen/IPA primary commitment engine.
+Enable the explicit `hyperkzg` feature to select Nova's official BN254
+`HyperKZG` engine. A production HyperKZG run must pass `--ptau-dir` (or call
+the corresponding `*_with_ptau_dir` API) with a directory containing trusted
+pruned Powers-of-Tau files such as `ppot_pruned_XX.ptau`. The regular setup
+entry points reject production HyperKZG setup without that directory. The
+feature's unit tests use Nova `test-utils` random parameters only for regression
+tests and must not be reused in production.
+
 Bellpepper constraint construction, Nova transcript control, and MSM remain
 host-orchestrated. During the official Nova proof, the patched backend sends
 the arithmetic-heavy A/B/C CSR SpMV, NIFS cross-term, and relaxed-witness vector
@@ -38,6 +47,20 @@ export CUDA_TOOLKIT_PATH=/usr/local/cuda
 CUDA_OXIDE_TARGET=sm_70 cargo oxide run \
   --features cuda,gpu-msm --arch sm_70 --bin cuda-nova -- --prove
 ```
+
+With HyperKZG and a trusted SRS directory:
+
+```sh
+CUDA_OXIDE_TARGET=sm_70 cargo oxide run \
+  --features cuda,hyperkzg --arch sm_70 --bin cuda-nova -- \
+  --prove --ptau-dir ./ptau_files
+```
+
+The HyperKZG feature selects Nova's primary commitment backend; it does not
+change Nova's recursive protocol or turn this sidecar into HyperNova. CUDA
+still handles the registered arithmetic-heavy SpMV, cross-term, and fold
+paths, while Bellpepper synthesis, transcript orchestration, and MSM follow the
+documented host boundary.
 
 The output includes upload, repeated-kernel, download, and end-to-end
 microsecond measurements, plus a Poseidon preflight timing. With `--prove` it

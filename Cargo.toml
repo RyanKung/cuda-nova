@@ -14,6 +14,7 @@ cuda = [
     "dep:cuda-host",
 ]
 gpu-msm = ["zkfly-nova/gpu-msm"]
+hyperkzg = ["zkfly-nova/hyperkzg", "nova-snark/io"]
 
 [dependencies]
 ark-bn254.workspace = true

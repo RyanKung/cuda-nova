@@ -321,6 +321,43 @@ impl CudaNovaEngine {
         )?)
     }
 
+    /// GPU-preflights and proves a topology trace with trusted `HyperKZG` setup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a CUDA sidecar, setup, or official Nova proving error.
+    #[cfg(feature = "hyperkzg")]
+    pub fn prove_with_ptau_dir(
+        &self,
+        steps: &[TopologyFoldStep],
+        ptau_dir: &Path,
+    ) -> Result<zkfly_nova::TopologyNovaProof, CudaNovaError> {
+        self.validate_poseidon_steps(steps)?;
+        Ok(zkfly_nova::TopologyNovaProof::prove_with_ptau_dir(
+            steps, ptau_dir,
+        )?)
+    }
+
+    /// GPU-preflights and proves a topology trace against a root with `HyperKZG`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a CUDA sidecar, setup, root, or official Nova proving error.
+    #[cfg(feature = "hyperkzg")]
+    pub fn prove_for_root_with_ptau_dir(
+        &self,
+        steps: &[TopologyFoldStep],
+        claimed_root: Commitment,
+        ptau_dir: &Path,
+    ) -> Result<zkfly_nova::TopologyNovaProof, CudaNovaError> {
+        self.validate_poseidon_steps(steps)?;
+        Ok(zkfly_nova::TopologyNovaProof::prove_for_root_with_ptau_dir(
+            steps,
+            claimed_root,
+            ptau_dir,
+        )?)
+    }
+
     /// Proves a sequence of private weighted forward passes for one fixed CSR
     /// topology.
     ///
@@ -388,6 +425,35 @@ impl CudaNovaEngine {
         }
     }
 
+    /// Sets up weighted-forward parameters from trusted `HyperKZG` setup files.
+    ///
+    /// # Errors
+    ///
+    /// Returns a CUDA sidecar, setup, or official Nova parameter-generation error.
+    #[cfg(feature = "hyperkzg")]
+    pub fn setup_weighted_forward_with_ptau_dir(
+        &self,
+        topology: std::sync::Arc<zkfly_nova::CsrTopology>,
+        shape_witness: &zkfly_nova::WeightedForwardWitness,
+        ptau_dir: &Path,
+    ) -> Result<zkfly_nova::WeightedForwardParameters, CudaNovaError> {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        {
+            let _ = &self.runtime;
+            return Ok(zkfly_nova::WeightedForwardParameters::setup_with_ptau_dir(
+                topology,
+                shape_witness,
+                ptau_dir,
+            )?);
+        }
+
+        #[cfg(not(all(feature = "cuda", target_os = "linux")))]
+        {
+            let _ = (topology, shape_witness, ptau_dir);
+            Err(CudaNovaError::BackendUnavailable)
+        }
+    }
+
     /// Proves weighted forward passes with previously prepared parameters.
     ///
     /// This method keeps Nova public-parameter setup outside the proof's hot
@@ -415,6 +481,35 @@ impl CudaNovaEngine {
         #[cfg(not(all(feature = "cuda", target_os = "linux")))]
         {
             let _ = (parameters, witnesses);
+            Err(CudaNovaError::BackendUnavailable)
+        }
+    }
+
+    /// GPU-preflights and proves weighted-forward passes with `HyperKZG` setup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a CUDA sidecar, setup, witness-chain, or official Nova proving error.
+    #[cfg(feature = "hyperkzg")]
+    pub fn prove_weighted_forward_with_ptau_dir(
+        &self,
+        topology: std::sync::Arc<zkfly_nova::CsrTopology>,
+        witnesses: &[zkfly_nova::WeightedForwardWitness],
+        ptau_dir: &Path,
+    ) -> Result<zkfly_nova::WeightedForwardProof, CudaNovaError> {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        {
+            let first = witnesses
+                .first()
+                .ok_or(zkfly_nova::TopologyNovaError::EmptyTrace)?;
+            let parameters =
+                self.setup_weighted_forward_with_ptau_dir(topology, first, ptau_dir)?;
+            return self.prove_weighted_forward_with_parameters(&parameters, witnesses);
+        }
+
+        #[cfg(not(all(feature = "cuda", target_os = "linux")))]
+        {
+            let _ = (topology, witnesses, ptau_dir);
             Err(CudaNovaError::BackendUnavailable)
         }
     }
