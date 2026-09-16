@@ -141,9 +141,12 @@ fn run_weighted_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
         &[-Fr::from(3_u64), Fr::from(6_u64), Fr::from(4_u64)],
         &weights,
     )?;
+    let setup_start = Instant::now();
+    let parameters = engine.setup_weighted_forward(topology.clone(), &first)?;
+    let setup_microseconds = setup_start.elapsed().as_micros();
     let proof_start = Instant::now();
-    let proof =
-        engine.prove_weighted_forward(topology.clone(), &[first.clone(), second.clone()])?;
+    let proof = engine
+        .prove_weighted_forward_with_parameters(&parameters, &[first.clone(), second.clone()])?;
     let proof_microseconds = proof_start.elapsed().as_micros();
     if !proof.verify_against(
         topology.root(),
@@ -156,8 +159,9 @@ fn run_weighted_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
     }
     let stats = engine.gpu_backend_stats();
     println!(
-        "weighted-forward Nova proof passed: {} step(s), prove={}us constraints={} variables={} spmv={} fold={} cross_term={}",
+        "weighted-forward Nova proof passed: {} step(s), setup={}us prove={}us constraints={} variables={} spmv={} fold={} cross_term={}",
         proof.steps(),
+        setup_microseconds,
         proof_microseconds,
         proof.primary_constraints(),
         proof.primary_variables(),

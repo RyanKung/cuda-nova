@@ -343,15 +343,78 @@ impl CudaNovaEngine {
     ) -> Result<zkfly_nova::WeightedForwardProof, CudaNovaError> {
         #[cfg(all(feature = "cuda", target_os = "linux"))]
         {
-            let _ = &self.runtime;
-            return Ok(zkfly_nova::WeightedForwardProof::prove(
-                topology, witnesses,
-            )?);
+            let first = witnesses
+                .first()
+                .ok_or(zkfly_nova::TopologyNovaError::EmptyTrace)?;
+            let parameters = self.setup_weighted_forward(topology, first)?;
+            return self.prove_weighted_forward_with_parameters(&parameters, witnesses);
         }
 
         #[cfg(not(all(feature = "cuda", target_os = "linux")))]
         {
             let _ = (topology, witnesses);
+            Err(CudaNovaError::BackendUnavailable)
+        }
+    }
+
+    /// Sets up reusable public parameters for one fixed CSR forward shape.
+    ///
+    /// The shape witness is used only during Nova R1CS setup. Keep the returned
+    /// parameter object and pass it to [`Self::prove_weighted_forward_with_parameters`]
+    /// for subsequent proofs over the same topology and circuit shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CudaNovaError::BackendUnavailable`] when CUDA is unavailable,
+    /// or the official Nova setup error when the shape witness is invalid.
+    pub fn setup_weighted_forward(
+        &self,
+        topology: std::sync::Arc<zkfly_nova::CsrTopology>,
+        shape_witness: &zkfly_nova::WeightedForwardWitness,
+    ) -> Result<zkfly_nova::WeightedForwardParameters, CudaNovaError> {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        {
+            let _ = &self.runtime;
+            return Ok(zkfly_nova::WeightedForwardParameters::setup(
+                topology,
+                shape_witness,
+            )?);
+        }
+
+        #[cfg(not(all(feature = "cuda", target_os = "linux")))]
+        {
+            let _ = (topology, shape_witness);
+            Err(CudaNovaError::BackendUnavailable)
+        }
+    }
+
+    /// Proves weighted forward passes with previously prepared parameters.
+    ///
+    /// This method keeps Nova public-parameter setup outside the proof's hot
+    /// path, allowing multiple input/weight sequences to reuse one fixed CSR
+    /// shape. The arithmetic backend and CPU/GPU boundary are identical to
+    /// [`Self::prove_weighted_forward`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CudaNovaError::BackendUnavailable`] when CUDA is unavailable,
+    /// or the official Nova error when witness chaining or folding fails.
+    pub fn prove_weighted_forward_with_parameters(
+        &self,
+        parameters: &zkfly_nova::WeightedForwardParameters,
+        witnesses: &[zkfly_nova::WeightedForwardWitness],
+    ) -> Result<zkfly_nova::WeightedForwardProof, CudaNovaError> {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        {
+            let _ = &self.runtime;
+            return Ok(zkfly_nova::WeightedForwardProof::prove_with_parameters(
+                parameters, witnesses,
+            )?);
+        }
+
+        #[cfg(not(all(feature = "cuda", target_os = "linux")))]
+        {
+            let _ = (parameters, witnesses);
             Err(CudaNovaError::BackendUnavailable)
         }
     }
