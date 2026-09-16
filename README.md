@@ -62,6 +62,14 @@ still handles the registered arithmetic-heavy SpMV, cross-term, and fold
 paths, while Bellpepper synthesis, transcript orchestration, and MSM follow the
 documented host boundary.
 
+For callers that need commitments outside the recursive proof, the
+`zkfly-nova` crate exposes `VectorCommitmentBackend` and
+`HyperKzgVectorParameters`. The API supports dense vectors, canonical sparse
+matrix rows, and batch multilinear openings at a common point. It pads vectors
+to a power-of-two capacity and checks opening witnesses against their
+commitments. This standalone evaluation path is CPU-hosted in the current
+version; it is intentionally separate from the CUDA arithmetic kernels.
+
 The output includes upload, repeated-kernel, download, and end-to-end
 microsecond measurements, plus a Poseidon preflight timing. With `--prove` it
 also verifies the complete official Nova proof and reports the CUDA arithmetic
