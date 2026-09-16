@@ -55,16 +55,13 @@ ark-bn254 = "0.5.0"
 ark-ff = "0.5.0"
 halo2curves = "0.9.0"
 light-poseidon = "0.4.0"
-nova-snark = { version = "0.76.0", default-features = false }
+nova-snark = { git = "https://github.com/RyanKung/zkfly.git", rev = "542cc3385d650461540533bda8c4397463e0c932", default-features = false }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tempfile = "3.23.0"
 thiserror = "2.0.17"
-topology-commitment = { package = "zkfly-commitment", git = "https://github.com/RyanKung/zkfly.git", rev = "74f3a0265a2e7639bb57549a0230653275f6b1af" }
-topology-nova = { package = "zkfly-nova", git = "https://github.com/RyanKung/zkfly.git", rev = "74f3a0265a2e7639bb57549a0230653275f6b1af" }
-
-[patch.crates-io]
-nova-snark = { git = "https://github.com/RyanKung/zkfly.git", rev = "74f3a0265a2e7639bb57549a0230653275f6b1af" }
+topology-commitment = { package = "zkfly-commitment", git = "https://github.com/RyanKung/zkfly.git", rev = "542cc3385d650461540533bda8c4397463e0c932" }
+topology-nova = { package = "zkfly-nova", git = "https://github.com/RyanKung/zkfly.git", rev = "542cc3385d650461540533bda8c4397463e0c932" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

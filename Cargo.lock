@@ -1540,7 +1540,7 @@ dependencies = [
 [[package]]
 name = "nova-snark"
 version = "0.76.0"
-source = "git+https://github.com/RyanKung/zkfly.git?rev=74f3a0265a2e7639bb57549a0230653275f6b1af#74f3a0265a2e7639bb57549a0230653275f6b1af"
+source = "git+https://github.com/RyanKung/zkfly.git?rev=542cc3385d650461540533bda8c4397463e0c932#542cc3385d650461540533bda8c4397463e0c932"
 dependencies = [
  "bincode",
  "bitvec",
@@ -3206,7 +3206,7 @@ dependencies = [
 [[package]]
 name = "zkfly-commitment"
 version = "0.1.0"
-source = "git+https://github.com/RyanKung/zkfly.git?rev=74f3a0265a2e7639bb57549a0230653275f6b1af#74f3a0265a2e7639bb57549a0230653275f6b1af"
+source = "git+https://github.com/RyanKung/zkfly.git?rev=542cc3385d650461540533bda8c4397463e0c932#542cc3385d650461540533bda8c4397463e0c932"
 dependencies = [
  "ark-bn254",
  "ark-ff",
@@ -3219,7 +3219,7 @@ dependencies = [
 [[package]]
 name = "zkfly-nova"
 version = "0.1.0"
-source = "git+https://github.com/RyanKung/zkfly.git?rev=74f3a0265a2e7639bb57549a0230653275f6b1af#74f3a0265a2e7639bb57549a0230653275f6b1af"
+source = "git+https://github.com/RyanKung/zkfly.git?rev=542cc3385d650461540533bda8c4397463e0c932#542cc3385d650461540533bda8c4397463e0c932"
 dependencies = [
  "ark-bn254",
  "ark-ff",
