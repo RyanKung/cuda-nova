@@ -13,6 +13,9 @@ fn main() -> Result<(), CudaNovaError> {
     let should_prove = std::env::args()
         .skip(1)
         .any(|argument| argument == "--prove");
+    let profile_forward = std::env::args()
+        .skip(1)
+        .any(|argument| argument == "--profile-forward");
     let row_offsets: Vec<u32> = (0_u32..=50).collect();
     let column_indices: Vec<u32> = (0_u32..50).collect();
     let mut steps = Vec::new();
@@ -85,6 +88,9 @@ fn main() -> Result<(), CudaNovaError> {
     if should_prove {
         run_proof(&engine, &steps, root)?;
         run_weighted_forward(&engine)?;
+    }
+    if profile_forward {
+        run_forward_profile(&engine)?;
     }
     Ok(())
 }
@@ -170,4 +176,86 @@ fn run_weighted_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
         stats.cross_term_calls
     );
     Ok(())
+}
+
+/// Measures reusable weighted-forward proving over several recursive lengths.
+fn run_forward_profile(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
+    let (topology, witnesses) = forward_fixture(16)?;
+    let first = witnesses.first().ok_or(CudaNovaError::InvalidTranscript {
+        proposition: "the forward profile fixture has a first witness",
+    })?;
+    let setup_start = Instant::now();
+    let parameters = engine.setup_weighted_forward(topology.clone(), first)?;
+    let setup_microseconds = setup_start.elapsed().as_micros();
+    println!(
+        "weighted-forward profile setup: steps={}us constraints={} variables={}",
+        setup_microseconds,
+        parameters.primary_constraints(),
+        parameters.primary_variables()
+    );
+    for step_count in [1_usize, 2, 8, 16] {
+        let selected = witnesses
+            .get(..step_count)
+            .ok_or(CudaNovaError::InvalidTranscript {
+                proposition: "the forward profile fixture has enough witnesses",
+            })?;
+        let prove_start = Instant::now();
+        let proof = engine.prove_weighted_forward_with_parameters(&parameters, selected)?;
+        let prove_microseconds = prove_start.elapsed().as_micros();
+        let final_witness = selected.last().ok_or(CudaNovaError::InvalidTranscript {
+            proposition: "the selected forward profile is non-empty",
+        })?;
+        let verify_start = Instant::now();
+        let verified = proof.verify_against(
+            topology.root(),
+            first.input_commitment(),
+            final_witness.output_commitment(),
+        )?;
+        let verify_microseconds = verify_start.elapsed().as_micros();
+        if !verified {
+            return Err(CudaNovaError::Nova(
+                zkfly_nova::TopologyNovaError::InvalidFinalState,
+            ));
+        }
+        let step_count_u64 =
+            u64::try_from(step_count).map_err(|_| CudaNovaError::SizeOverflow {
+                target: "forward profile step count",
+            })?;
+        println!(
+            "weighted-forward profile: steps={} prove={}us prove_per_step={}us verify={}us",
+            proof.steps(),
+            prove_microseconds,
+            prove_microseconds / u128::from(step_count_u64),
+            verify_microseconds
+        );
+    }
+    Ok(())
+}
+
+/// Builds a deterministic chain of private forward witnesses for profiling.
+fn forward_fixture(
+    steps: usize,
+) -> Result<(Arc<CsrTopology>, Vec<WeightedForwardWitness>), CudaNovaError> {
+    let topology = Arc::new(CsrTopology::new(3, &[0, 2, 3, 4], &[0, 2, 1, 0])?);
+    let weights = vec![Fr::from(2_u64), -Fr::ONE, Fr::from(3_u64), Fr::from(4_u64)];
+    let mut input = vec![Fr::ONE, Fr::from(2_u64), Fr::from(5_u64)];
+    let mut witnesses = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        let witness = WeightedForwardWitness::new(&topology, &input, &weights)?;
+        input = fixed_forward_output(&input);
+        witnesses.push(witness);
+    }
+    Ok((topology, witnesses))
+}
+
+/// Evaluates the fixed three-neuron profile topology for the next input.
+fn fixed_forward_output(input: &[Fr]) -> Vec<Fr> {
+    let x0 = input.first().copied().unwrap_or(Fr::ZERO);
+    let x1 = input.get(1).copied().unwrap_or(Fr::ZERO);
+    let x2 = input.get(2).copied().unwrap_or(Fr::ZERO);
+    vec![
+        Fr::from(2_u64) * x0 - x2,
+        Fr::from(3_u64) * x1,
+        Fr::from(4_u64) * x0,
+    ]
 }
