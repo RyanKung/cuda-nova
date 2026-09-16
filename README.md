@@ -43,10 +43,11 @@ The output includes upload, repeated-kernel, download, and end-to-end
 microsecond measurements, plus a Poseidon preflight timing. With `--prove` it
 also verifies the complete official Nova proof and reports the CUDA arithmetic
 launch counters. The fixed two-step topology and weighted-forward runs are
-smoke baselines, not a full MaleCNS proof benchmark. The weighted-forward
-fixture currently accepts at most eleven neurons because its vector commitment
-fits one Poseidon rate.
+smoke baselines, not a full MaleCNS proof benchmark. Weighted-forward input and
+output commitments are folded in fixed Poseidon-rate chunks; the runner's
+fixture remains intentionally small for repeatable timing.
 
 For a reusable-parameter timing curve, run the same command with
 `--profile-forward` instead of `--prove`. It performs one setup and measures
-1, 2, 8, and 16 recursive weighted-forward steps using that parameter set.
+1, 2, 8, and 16 recursive weighted-forward steps using that parameter set,
+then proves a 12-neuron two-chunk commitment case.

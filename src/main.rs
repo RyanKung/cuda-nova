@@ -229,6 +229,45 @@ fn run_forward_profile(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
             verify_microseconds
         );
     }
+    run_chunked_forward(engine)?;
+    Ok(())
+}
+
+/// Proves one twelve-neuron identity pass to exercise a second Poseidon chunk.
+fn run_chunked_forward(engine: &CudaNovaEngine) -> Result<(), CudaNovaError> {
+    let row_offsets = (0_u32..=12).collect::<Vec<_>>();
+    let column_indices = (0_u32..12).collect::<Vec<_>>();
+    let topology = Arc::new(CsrTopology::new(12, &row_offsets, &column_indices)?);
+    let input = (1_u64..=12).map(Fr::from).collect::<Vec<_>>();
+    let weights = vec![Fr::ONE; 12];
+    let first = WeightedForwardWitness::new(&topology, &input, &weights)?;
+    let setup_start = Instant::now();
+    let parameters = engine.setup_weighted_forward(topology.clone(), &first)?;
+    let setup_microseconds = setup_start.elapsed().as_micros();
+    let prove_start = Instant::now();
+    let proof =
+        engine.prove_weighted_forward_with_parameters(&parameters, std::slice::from_ref(&first))?;
+    let prove_microseconds = prove_start.elapsed().as_micros();
+    let verify_start = Instant::now();
+    let verified = proof.verify_against(
+        topology.root(),
+        first.input_commitment(),
+        first.output_commitment(),
+    )?;
+    let verify_microseconds = verify_start.elapsed().as_micros();
+    if !verified {
+        return Err(CudaNovaError::Nova(
+            zkfly_nova::TopologyNovaError::InvalidFinalState,
+        ));
+    }
+    println!(
+        "weighted-forward chunked profile: neurons=12 chunks=2 setup={}us prove={}us verify={}us constraints={} variables={}",
+        setup_microseconds,
+        prove_microseconds,
+        verify_microseconds,
+        parameters.primary_constraints(),
+        parameters.primary_variables()
+    );
     Ok(())
 }
 
