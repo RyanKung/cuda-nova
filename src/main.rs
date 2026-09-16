@@ -63,6 +63,20 @@ fn main() -> Result<(), CudaNovaError> {
             });
         }
     }
+    let mut broken_digest_steps = steps.clone();
+    if let Some(step) = broken_digest_steps.first_mut() {
+        step.next[0] ^= 1;
+    }
+    match engine.validate_poseidon_steps(&broken_digest_steps) {
+        Err(CudaNovaError::GpuPoseidonMismatch { index: 0, .. }) => {
+            println!("cuda-nova negative preflight passed: Poseidon digest rejected");
+        }
+        Ok(_) | Err(_) => {
+            return Err(CudaNovaError::InvalidTranscript {
+                proposition: "the CUDA Poseidon kernel rejects a forged next digest",
+            });
+        }
+    }
     if run_proof {
         let proof = engine.prove(&steps)?;
         if !proof.verify()? {
