@@ -20,6 +20,8 @@ use topology_commitment::{Commitment, POSEIDON_RATE, TopologyFoldStep};
 mod cuda_backend;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 mod cuda_runtime;
+#[cfg(all(feature = "cuda", target_os = "linux"))]
+mod cuda_workspace;
 
 /// Number of bytes in one fixed-width encoded topology fold step.
 pub const ENCODED_STEP_BYTES: usize = 432;
@@ -68,15 +70,48 @@ pub struct ResidentValidationReport {
     pub end_to_end_microseconds: u64,
 }
 
-/// Counts successful Nova arithmetic operations dispatched to CUDA.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Counts and times successful Nova arithmetic operations dispatched to CUDA.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GpuBackendStats {
-    /// CSR matrix-vector launches used by Nova's R1CS relation.
+    /// Logical CSR matrix-vector products used by Nova's R1CS relation.
     pub spmv_calls: u64,
+    /// Physical CUDA launches used to execute the logical CSR products.
+    pub spmv_batches: u64,
     /// Vector fold launches used by Nova's relaxed witness updates.
     pub fold_calls: u64,
     /// Cross-term launches used by Nova's NIFS fold.
     pub cross_term_calls: u64,
+    /// End-to-end microseconds spent in successful CSR requests.
+    pub spmv_microseconds: u64,
+    /// End-to-end microseconds spent in successful relaxed-witness folds.
+    pub fold_microseconds: u64,
+    /// End-to-end microseconds spent in successful NIFS cross-terms.
+    pub cross_term_microseconds: u64,
+    /// Exact static CSR cache hits.
+    pub csr_cache_hits: u64,
+    /// Exact static CSR cache misses.
+    pub csr_cache_misses: u64,
+    /// Reusable fold or cross-term output-buffer cache hits.
+    pub output_cache_hits: u64,
+    /// Reusable fold or cross-term output-buffer cache misses.
+    pub output_cache_misses: u64,
+    /// Device buffers allocated by the arithmetic backend.
+    pub device_buffer_allocations: u64,
+    /// Stream synchronizations issued by the arithmetic backend.
+    pub stream_synchronizations: u64,
+}
+
+/// Counts and times calls routed through Nova's optional Blitzar MSM provider.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GpuMsmStats {
+    /// Number of single or batched provider calls.
+    pub calls: u64,
+    /// Number of commitment outputs requested across those calls.
+    pub batches: u64,
+    /// Number of scalar-base pairs processed across all outputs.
+    pub scalars: u64,
+    /// End-to-end microseconds spent inside the provider boundary.
+    pub microseconds: u64,
 }
 
 /// Errors returned by the CUDA sidecar engine.
@@ -523,21 +558,42 @@ impl CudaNovaEngine {
     pub fn gpu_backend_stats(&self) -> GpuBackendStats {
         #[cfg(all(feature = "cuda", target_os = "linux"))]
         {
-            let (spmv_calls, fold_calls, cross_term_calls) = self.runtime.backend_stats();
-            return GpuBackendStats {
-                spmv_calls,
-                fold_calls,
-                cross_term_calls,
-            };
+            self.runtime.backend_stats()
         }
 
         #[cfg(not(all(feature = "cuda", target_os = "linux")))]
         {
-            GpuBackendStats {
-                spmv_calls: 0,
-                fold_calls: 0,
-                cross_term_calls: 0,
+            GpuBackendStats::default()
+        }
+    }
+
+    /// Returns work routed through the optional Blitzar MSM provider.
+    #[must_use]
+    pub fn gpu_msm_stats(&self) -> GpuMsmStats {
+        #[cfg(all(
+            feature = "cuda",
+            feature = "gpu-msm",
+            target_os = "linux",
+            target_arch = "x86_64"
+        ))]
+        {
+            let stats = nova_snark::provider::blitzar::stats();
+            GpuMsmStats {
+                calls: stats.calls,
+                batches: stats.batches,
+                scalars: stats.scalars,
+                microseconds: stats.microseconds,
             }
+        }
+
+        #[cfg(not(all(
+            feature = "cuda",
+            feature = "gpu-msm",
+            target_os = "linux",
+            target_arch = "x86_64"
+        )))]
+        {
+            GpuMsmStats::default()
         }
     }
 

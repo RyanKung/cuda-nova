@@ -22,6 +22,8 @@ ark-ff.workspace = true
 light-poseidon.workspace = true
 halo2curves.workspace = true
 nova-snark.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 topology-commitment.workspace = true
 
@@ -33,6 +35,9 @@ topology-nova.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 topology-nova.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

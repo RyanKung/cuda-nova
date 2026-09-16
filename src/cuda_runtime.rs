@@ -14,8 +14,10 @@ use cuda_host::cuda_module;
 use light_poseidon::parameters::bn254_x5::get_poseidon_parameters;
 use topology_commitment::{COMMITMENT_BYTES, POSEIDON_INPUTS, TOPOLOGY_DOMAIN, TopologyFoldStep};
 
+use crate::cuda_workspace::{CsrMatrixInput, CudaWorkspace, FieldLimbs};
 use crate::{
-    CudaNovaError, ENCODED_STEP_BYTES, ResidentValidationReport, ValidationReport, encode_steps,
+    CudaNovaError, ENCODED_STEP_BYTES, GpuBackendStats, ResidentValidationReport, ValidationReport,
+    encode_steps,
 };
 
 /// Number of CUDA threads in one launch block.
@@ -56,9 +58,6 @@ const FIELD_MODULUS_2: u64 = 0xb850_45b6_8181_585d;
 
 /// Most-significant limb of the BN254 scalar modulus.
 const FIELD_MODULUS_3: u64 = 0x3064_4e72_e131_a029;
-
-/// A BN254 scalar represented as four little-endian 64-bit limbs.
-type FieldLimbs = [u64; 4];
 
 /// Montgomery reduction parameters for one Nova cycle scalar field.
 #[derive(Clone, Copy)]
@@ -168,6 +167,39 @@ struct PoseidonHostParameters {
     domain: FieldLimbs,
 }
 
+/// Successful arithmetic result plus auditable CUDA resource accounting.
+struct ArithmeticRun<T> {
+    /// Canonical result returned to Nova.
+    output: T,
+    /// Whether the request launched a non-empty CUDA kernel.
+    launched: bool,
+    /// Number of device buffers allocated for this request.
+    device_buffer_allocations: u64,
+    /// Exact CSR cache outcome and logical matrix count for an `SpMV` request.
+    csr_cache_hit: Option<bool>,
+    /// Number of logical matrices represented by the CSR cache outcome.
+    csr_cache_operations: u64,
+    /// Reusable output cache outcome for a fold or cross-term request.
+    output_cache_hit: Option<bool>,
+    /// Explicit or download-implied stream synchronizations for this request.
+    stream_synchronizations: u64,
+}
+
+impl ArithmeticRun<Vec<u8>> {
+    /// Returns a successful empty request that did not reach the device.
+    const fn empty(output: Vec<u8>) -> Self {
+        Self {
+            output,
+            launched: false,
+            device_buffer_allocations: 0,
+            csr_cache_hit: None,
+            csr_cache_operations: 0,
+            output_cache_hit: None,
+            stream_synchronizations: 0,
+        }
+    }
+}
+
 /// Typed CUDA context and generated validation module.
 pub(crate) struct CudaRuntime {
     /// Context retained for all device allocations and launches.
@@ -184,14 +216,34 @@ pub(crate) struct CudaRuntime {
     poseidon_partial_rounds: u32,
     /// Montgomery-limb topology domain separator.
     poseidon_domain: FieldLimbs,
-    /// Serializes context binding and buffer teardown for this MVP.
-    execution_lock: Mutex<()>,
+    /// Serializes launches and owns bounded device allocations reused by them.
+    execution_workspace: Mutex<CudaWorkspace>,
     /// Number of successful CSR launches through the Nova backend hook.
     spmv_calls: AtomicU64,
+    /// Number of physical kernels used for successful CSR requests.
+    spmv_batches: AtomicU64,
     /// Number of successful vector-fold launches through the Nova backend hook.
     fold_calls: AtomicU64,
     /// Number of successful cross-term launches through the Nova backend hook.
     cross_term_calls: AtomicU64,
+    /// End-to-end host and device time spent in successful CSR requests.
+    spmv_microseconds: AtomicU64,
+    /// End-to-end host and device time spent in successful vector folds.
+    fold_microseconds: AtomicU64,
+    /// End-to-end host and device time spent in successful cross-term requests.
+    cross_term_microseconds: AtomicU64,
+    /// Number of exact CSR cache hits.
+    csr_cache_hits: AtomicU64,
+    /// Number of exact CSR cache misses.
+    csr_cache_misses: AtomicU64,
+    /// Number of reusable arithmetic-output cache hits.
+    output_cache_hits: AtomicU64,
+    /// Number of reusable arithmetic-output cache misses.
+    output_cache_misses: AtomicU64,
+    /// Number of device-buffer allocations issued by arithmetic requests.
+    device_buffer_allocations: AtomicU64,
+    /// Number of stream synchronizations issued by arithmetic requests.
+    stream_synchronizations: AtomicU64,
 }
 
 #[cuda_module]
@@ -800,20 +852,40 @@ impl CudaRuntime {
             poseidon_full_rounds: parameters.full_rounds,
             poseidon_partial_rounds: parameters.partial_rounds,
             poseidon_domain: parameters.domain,
-            execution_lock: Mutex::new(()),
+            execution_workspace: Mutex::new(CudaWorkspace::default()),
             spmv_calls: AtomicU64::new(0),
+            spmv_batches: AtomicU64::new(0),
             fold_calls: AtomicU64::new(0),
             cross_term_calls: AtomicU64::new(0),
+            spmv_microseconds: AtomicU64::new(0),
+            fold_microseconds: AtomicU64::new(0),
+            cross_term_microseconds: AtomicU64::new(0),
+            csr_cache_hits: AtomicU64::new(0),
+            csr_cache_misses: AtomicU64::new(0),
+            output_cache_hits: AtomicU64::new(0),
+            output_cache_misses: AtomicU64::new(0),
+            device_buffer_allocations: AtomicU64::new(0),
+            stream_synchronizations: AtomicU64::new(0),
         })
     }
 
-    /// Returns successful arithmetic launches since runtime creation.
-    pub(crate) fn backend_stats(&self) -> (u64, u64, u64) {
-        (
-            self.spmv_calls.load(Ordering::Relaxed),
-            self.fold_calls.load(Ordering::Relaxed),
-            self.cross_term_calls.load(Ordering::Relaxed),
-        )
+    /// Returns successful arithmetic work and cache activity since creation.
+    pub(crate) fn backend_stats(&self) -> GpuBackendStats {
+        GpuBackendStats {
+            spmv_calls: self.spmv_calls.load(Ordering::Relaxed),
+            spmv_batches: self.spmv_batches.load(Ordering::Relaxed),
+            fold_calls: self.fold_calls.load(Ordering::Relaxed),
+            cross_term_calls: self.cross_term_calls.load(Ordering::Relaxed),
+            spmv_microseconds: self.spmv_microseconds.load(Ordering::Relaxed),
+            fold_microseconds: self.fold_microseconds.load(Ordering::Relaxed),
+            cross_term_microseconds: self.cross_term_microseconds.load(Ordering::Relaxed),
+            csr_cache_hits: self.csr_cache_hits.load(Ordering::Relaxed),
+            csr_cache_misses: self.csr_cache_misses.load(Ordering::Relaxed),
+            output_cache_hits: self.output_cache_hits.load(Ordering::Relaxed),
+            output_cache_misses: self.output_cache_misses.load(Ordering::Relaxed),
+            device_buffer_allocations: self.device_buffer_allocations.load(Ordering::Relaxed),
+            stream_synchronizations: self.stream_synchronizations.load(Ordering::Relaxed),
+        }
     }
 
     /// Uploads and validates a canonical transcript on the CUDA device.
@@ -830,8 +902,8 @@ impl CudaRuntime {
             u32::try_from(ENCODED_STEP_BYTES).map_err(|_| CudaNovaError::SizeOverflow {
                 target: "CUDA encoded step size",
             })?;
-        let _guard = self
-            .execution_lock
+        let _workspace = self
+            .execution_workspace
             .lock()
             .map_err(|_| CudaNovaError::RuntimeStatePoisoned)?;
         self.context.bind_to_thread()?;
@@ -883,8 +955,8 @@ impl CudaRuntime {
             u32::try_from(ENCODED_STEP_BYTES).map_err(|_| CudaNovaError::SizeOverflow {
                 target: "CUDA encoded step size",
             })?;
-        let _guard = self
-            .execution_lock
+        let _workspace = self
+            .execution_workspace
             .lock()
             .map_err(|_| CudaNovaError::RuntimeStatePoisoned)?;
         self.context.bind_to_thread()?;
@@ -954,8 +1026,8 @@ impl CudaRuntime {
             u32::try_from(ENCODED_STEP_BYTES).map_err(|_| CudaNovaError::SizeOverflow {
                 target: "CUDA encoded step size",
             })?;
-        let _guard = self
-            .execution_lock
+        let _workspace = self
+            .execution_workspace
             .lock()
             .map_err(|_| CudaNovaError::RuntimeStatePoisoned)?;
         self.context.bind_to_thread()?;
@@ -1006,6 +1078,7 @@ impl CudaRuntime {
         field_width: usize,
         modulus: &[u8],
     ) -> Option<Vec<u8>> {
+        let start = Instant::now();
         let result = self
             .run_spmv(
                 row_offsets,
@@ -1015,11 +1088,52 @@ impl CudaRuntime {
                 field_width,
                 modulus,
             )
-            .ok();
-        if result.is_some() {
-            self.spmv_calls.fetch_add(1, Ordering::Relaxed);
+            .ok()?;
+        self.record_arithmetic_run(
+            &result,
+            duration_microseconds(start.elapsed()),
+            &self.spmv_calls,
+            &self.spmv_microseconds,
+            1,
+        );
+        if result.launched {
+            self.spmv_batches.fetch_add(1, Ordering::Relaxed);
         }
-        result
+        Some(result.output)
+    }
+
+    /// Evaluates the Nova A, B, and C products in one device batch.
+    pub(crate) fn spmv_three(
+        &self,
+        row_offsets: [&[usize]; 3],
+        column_indices: [&[usize]; 3],
+        values: [&[u8]; 3],
+        vector: &[u8],
+        field_width: usize,
+        modulus: &[u8],
+    ) -> Option<[Vec<u8>; 3]> {
+        let start = Instant::now();
+        let result = self
+            .run_spmv_three(
+                row_offsets,
+                column_indices,
+                values,
+                vector,
+                field_width,
+                modulus,
+            )
+            .ok()?;
+        self.record_arithmetic_run(
+            &result,
+            duration_microseconds(start.elapsed()),
+            &self.spmv_calls,
+            &self.spmv_microseconds,
+            3,
+        );
+        if result.launched {
+            self.spmv_batches.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(result.output)
     }
 
     /// Folds two field vectors on the selected device.
@@ -1031,13 +1145,18 @@ impl CudaRuntime {
         field_width: usize,
         modulus: &[u8],
     ) -> Option<Vec<u8>> {
+        let start = Instant::now();
         let result = self
             .run_vector_linear_combination(left, right, scalar, field_width, modulus)
-            .ok();
-        if result.is_some() {
-            self.fold_calls.fetch_add(1, Ordering::Relaxed);
-        }
-        result
+            .ok()?;
+        self.record_arithmetic_run(
+            &result,
+            duration_microseconds(start.elapsed()),
+            &self.fold_calls,
+            &self.fold_microseconds,
+            1,
+        );
+        Some(result.output)
     }
 
     /// Evaluates the Nova cross-term on the selected device.
@@ -1051,13 +1170,54 @@ impl CudaRuntime {
         field_width: usize,
         modulus: &[u8],
     ) -> Option<Vec<u8>> {
+        let start = Instant::now();
         let result = self
             .run_cross_term(az, bz, cz, error, u, field_width, modulus)
-            .ok();
-        if result.is_some() {
-            self.cross_term_calls.fetch_add(1, Ordering::Relaxed);
+            .ok()?;
+        self.record_arithmetic_run(
+            &result,
+            duration_microseconds(start.elapsed()),
+            &self.cross_term_calls,
+            &self.cross_term_microseconds,
+            1,
+        );
+        Some(result.output)
+    }
+
+    /// Adds one successful launch's time, cache, allocation, and sync counters.
+    fn record_arithmetic_run<T>(
+        &self,
+        run: &ArithmeticRun<T>,
+        microseconds: u64,
+        call_counter: &AtomicU64,
+        time_counter: &AtomicU64,
+        logical_calls: u64,
+    ) {
+        if !run.launched {
+            return;
         }
-        result
+        call_counter.fetch_add(logical_calls, Ordering::Relaxed);
+        time_counter.fetch_add(microseconds, Ordering::Relaxed);
+        self.device_buffer_allocations
+            .fetch_add(run.device_buffer_allocations, Ordering::Relaxed);
+        self.stream_synchronizations
+            .fetch_add(run.stream_synchronizations, Ordering::Relaxed);
+        if let Some(hit) = run.csr_cache_hit {
+            let counter = if hit {
+                &self.csr_cache_hits
+            } else {
+                &self.csr_cache_misses
+            };
+            counter.fetch_add(run.csr_cache_operations, Ordering::Relaxed);
+        }
+        if let Some(hit) = run.output_cache_hit {
+            let counter = if hit {
+                &self.output_cache_hits
+            } else {
+                &self.output_cache_misses
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Executes the GPU CSR matrix-vector kernel and converts its result back.
@@ -1069,77 +1229,186 @@ impl CudaRuntime {
         vector: &[u8],
         field_width: usize,
         modulus: &[u8],
-    ) -> Result<Vec<u8>, CudaNovaError> {
+    ) -> Result<ArithmeticRun<Vec<u8>>, CudaNovaError> {
         let config = field_config(modulus, field_width)?;
-        let rows = row_offsets
-            .len()
-            .checked_sub(1)
-            .ok_or(CudaNovaError::SizeOverflow {
-                target: "CSR row count",
-            })?;
-        if rows == 0 {
-            return Ok(Vec::new());
-        }
-        let values_count = values.len() / field_width;
-        if values.len() % field_width != 0
-            || values_count != column_indices.len()
-            || row_offsets.last().copied() != Some(values_count)
-        {
-            return Err(CudaNovaError::InvalidTranscript {
-                proposition: "CSR matrix buffers have compatible lengths",
-            });
-        }
         let packed_vector = packed_to_montgomery(vector, field_width, &config)?;
-        let packed_values = packed_to_montgomery(values, field_width, &config)?;
-        let row_offsets = row_offsets
-            .iter()
-            .copied()
-            .map(|value| {
-                u32::try_from(value).map_err(|_| CudaNovaError::SizeOverflow {
-                    target: "CSR row offset",
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let column_indices = column_indices
-            .iter()
-            .copied()
-            .map(|value| {
-                u32::try_from(value).map_err(|_| CudaNovaError::SizeOverflow {
-                    target: "CSR column index",
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let input = CsrMatrixInput {
+            row_offsets,
+            column_indices,
+            values,
+        };
+        let rows = validate_csr_input(input, field_width, packed_vector.len())?;
+        if rows == 0 {
+            return Ok(ArithmeticRun::empty(Vec::new()));
+        }
         let rows_u32 = u32::try_from(rows).map_err(|_| CudaNovaError::SizeOverflow {
             target: "CUDA CSR row count",
         })?;
-        let _guard = self
-            .execution_lock
+        let mut workspace = self
+            .execution_workspace
             .lock()
             .map_err(|_| CudaNovaError::RuntimeStatePoisoned)?;
         self.context.bind_to_thread()?;
         let stream = self.context.default_stream();
-        let row_offsets_device = DeviceBuffer::from_host(&stream, &row_offsets)?;
-        let column_indices_device = DeviceBuffer::from_host(&stream, &column_indices)?;
-        let values_device = DeviceBuffer::from_host(&stream, &packed_values)?;
         let vector_device = DeviceBuffer::from_host(&stream, &packed_vector)?;
-        let mut output_device = DeviceBuffer::<FieldLimbs>::zeroed(&stream, rows)?;
-        stream.synchronize()?;
+        let cache = workspace.csr_matrix(
+            &stream,
+            row_offsets,
+            column_indices,
+            values,
+            field_width,
+            modulus,
+            rows,
+            || packed_to_montgomery(values, field_width, &config),
+        )?;
+        let cache_hit = cache.hit;
+        let device_buffer_allocations = cache.device_buffer_allocations + 1;
+        let matrix = cache.value;
         let launch = launch_config(rows)?;
         self.module.spmv_rows(
             &stream,
             launch,
-            &row_offsets_device,
-            &column_indices_device,
-            &values_device,
+            &matrix.row_offsets_device,
+            &matrix.column_indices_device,
+            &matrix.values_device,
             &vector_device,
             rows_u32,
             config.modulus,
             config.modulus_inverse_word,
-            &mut output_device,
+            &mut matrix.output_device,
         )?;
-        stream.synchronize()?;
-        let output = output_device.to_host_vec(&stream)?;
-        montgomery_to_packed(&output, &config)
+        let output = matrix.output_device.to_host_vec(&stream)?;
+        Ok(ArithmeticRun {
+            output: montgomery_to_packed(&output, &config)?,
+            launched: true,
+            device_buffer_allocations,
+            csr_cache_hit: Some(cache_hit),
+            csr_cache_operations: 1,
+            output_cache_hit: None,
+            stream_synchronizations: 1,
+        })
+    }
+
+    /// Executes three same-height CSR products with one vector transfer and launch.
+    fn run_spmv_three(
+        &self,
+        row_offsets: [&[usize]; 3],
+        column_indices: [&[usize]; 3],
+        values: [&[u8]; 3],
+        vector: &[u8],
+        field_width: usize,
+        modulus: &[u8],
+    ) -> Result<ArithmeticRun<[Vec<u8>; 3]>, CudaNovaError> {
+        let config = field_config(modulus, field_width)?;
+        let packed_vector = packed_to_montgomery(vector, field_width, &config)?;
+        let [a_rows, b_rows, c_rows] = row_offsets;
+        let [a_columns, b_columns, c_columns] = column_indices;
+        let [a_values, b_values, c_values] = values;
+        let inputs = [
+            CsrMatrixInput {
+                row_offsets: a_rows,
+                column_indices: a_columns,
+                values: a_values,
+            },
+            CsrMatrixInput {
+                row_offsets: b_rows,
+                column_indices: b_columns,
+                values: b_values,
+            },
+            CsrMatrixInput {
+                row_offsets: c_rows,
+                column_indices: c_columns,
+                values: c_values,
+            },
+        ];
+        let [a_input, b_input, c_input] = inputs;
+        let a_row_count = validate_csr_input(a_input, field_width, packed_vector.len())?;
+        let b_row_count = validate_csr_input(b_input, field_width, packed_vector.len())?;
+        let c_row_count = validate_csr_input(c_input, field_width, packed_vector.len())?;
+        if a_row_count != b_row_count || a_row_count != c_row_count {
+            return Err(CudaNovaError::InvalidTranscript {
+                proposition: "the batched CSR matrices have equal row counts",
+            });
+        }
+        if a_row_count == 0 {
+            return Ok(ArithmeticRun {
+                output: [Vec::new(), Vec::new(), Vec::new()],
+                launched: false,
+                device_buffer_allocations: 0,
+                csr_cache_hit: None,
+                csr_cache_operations: 0,
+                output_cache_hit: None,
+                stream_synchronizations: 0,
+            });
+        }
+        let total_rows = a_row_count
+            .checked_mul(3)
+            .ok_or(CudaNovaError::SizeOverflow {
+                target: "three-matrix CUDA launch size",
+            })?;
+        let total_rows_u32 =
+            u32::try_from(total_rows).map_err(|_| CudaNovaError::SizeOverflow {
+                target: "CUDA batched CSR row count",
+            })?;
+        let mut workspace = self
+            .execution_workspace
+            .lock()
+            .map_err(|_| CudaNovaError::RuntimeStatePoisoned)?;
+        self.context.bind_to_thread()?;
+        let stream = self.context.default_stream();
+        let vector_device = DeviceBuffer::from_host(&stream, &packed_vector)?;
+        let cache =
+            workspace.csr_batch(&stream, inputs, field_width, modulus, a_row_count, || {
+                Ok([
+                    packed_to_montgomery(a_values, field_width, &config)?,
+                    packed_to_montgomery(b_values, field_width, &config)?,
+                    packed_to_montgomery(c_values, field_width, &config)?,
+                ])
+            })?;
+        let cache_hit = cache.hit;
+        let device_buffer_allocations = cache.device_buffer_allocations + 1;
+        let batch = cache.value;
+        self.module.spmv_rows(
+            &stream,
+            launch_config(total_rows)?,
+            &batch.row_offsets_device,
+            &batch.column_indices_device,
+            &batch.values_device,
+            &vector_device,
+            total_rows_u32,
+            config.modulus,
+            config.modulus_inverse_word,
+            &mut batch.output_device,
+        )?;
+        let output = batch.output_device.to_host_vec(&stream)?;
+        let mut chunks = output.chunks_exact(a_row_count);
+        let packed_a = chunks.next().ok_or(CudaNovaError::InvalidTranscript {
+            proposition: "the fused CSR output contains the A rows",
+        })?;
+        let packed_b = chunks.next().ok_or(CudaNovaError::InvalidTranscript {
+            proposition: "the fused CSR output contains the B rows",
+        })?;
+        let packed_c = chunks.next().ok_or(CudaNovaError::InvalidTranscript {
+            proposition: "the fused CSR output contains the C rows",
+        })?;
+        if !chunks.remainder().is_empty() || chunks.next().is_some() {
+            return Err(CudaNovaError::InvalidTranscript {
+                proposition: "the fused CSR output contains exactly three row ranges",
+            });
+        }
+        Ok(ArithmeticRun {
+            output: [
+                montgomery_to_packed(packed_a, &config)?,
+                montgomery_to_packed(packed_b, &config)?,
+                montgomery_to_packed(packed_c, &config)?,
+            ],
+            launched: true,
+            device_buffer_allocations,
+            csr_cache_hit: Some(cache_hit),
+            csr_cache_operations: 3,
+            output_cache_hit: None,
+            stream_synchronizations: 1,
+        })
     }
 
     /// Executes the GPU vector-fold kernel and converts its result back.
@@ -1150,7 +1419,7 @@ impl CudaRuntime {
         scalar: &[u8],
         field_width: usize,
         modulus: &[u8],
-    ) -> Result<Vec<u8>, CudaNovaError> {
+    ) -> Result<ArithmeticRun<Vec<u8>>, CudaNovaError> {
         let config = field_config(modulus, field_width)?;
         let left = packed_to_montgomery(left, field_width, &config)?;
         let right = packed_to_montgomery(right, field_width, &config)?;
@@ -1162,13 +1431,22 @@ impl CudaRuntime {
         let scalar = packed_to_montgomery(scalar, field_width, &config)?;
         let scalar = scalar.first().copied().ok_or(CudaNovaError::EmptyTrace)?;
         if left.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ArithmeticRun::empty(Vec::new()));
         }
         let count = u32::try_from(left.len()).map_err(|_| CudaNovaError::SizeOverflow {
             target: "CUDA fold vector length",
         })?;
-        let output = self.run_fold_kernel(&left, &right, scalar, count, config)?;
-        montgomery_to_packed(&output, &config)
+        let (output, output_cache_hit, device_buffer_allocations) =
+            self.run_fold_kernel(&left, &right, scalar, count, config)?;
+        Ok(ArithmeticRun {
+            output: montgomery_to_packed(&output, &config)?,
+            launched: true,
+            device_buffer_allocations,
+            csr_cache_hit: None,
+            csr_cache_operations: 0,
+            output_cache_hit: Some(output_cache_hit),
+            stream_synchronizations: 1,
+        })
     }
 
     /// Executes the GPU cross-term kernel and converts its result back.
@@ -1181,7 +1459,7 @@ impl CudaRuntime {
         u: &[u8],
         field_width: usize,
         modulus: &[u8],
-    ) -> Result<Vec<u8>, CudaNovaError> {
+    ) -> Result<ArithmeticRun<Vec<u8>>, CudaNovaError> {
         let config = field_config(modulus, field_width)?;
         let az = packed_to_montgomery(az, field_width, &config)?;
         let bz = packed_to_montgomery(bz, field_width, &config)?;
@@ -1195,13 +1473,13 @@ impl CudaRuntime {
             });
         }
         if az.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ArithmeticRun::empty(Vec::new()));
         }
         let count = u32::try_from(az.len()).map_err(|_| CudaNovaError::SizeOverflow {
             target: "CUDA cross-term vector length",
         })?;
-        let _guard = self
-            .execution_lock
+        let mut workspace = self
+            .execution_workspace
             .lock()
             .map_err(|_| CudaNovaError::RuntimeStatePoisoned)?;
         self.context.bind_to_thread()?;
@@ -1210,8 +1488,10 @@ impl CudaRuntime {
         let bz_device = DeviceBuffer::from_host(&stream, &bz)?;
         let cz_device = DeviceBuffer::from_host(&stream, &cz)?;
         let error_device = DeviceBuffer::from_host(&stream, &error)?;
-        let mut output_device = DeviceBuffer::<FieldLimbs>::zeroed(&stream, az.len())?;
-        stream.synchronize()?;
+        let output = workspace.output(&stream, az.len())?;
+        let output_cache_hit = output.hit;
+        let device_buffer_allocations = output.device_buffer_allocations + 4;
+        let output_device = output.value;
         self.module.cross_term(
             &stream,
             launch_config(az.len())?,
@@ -1223,11 +1503,18 @@ impl CudaRuntime {
             count,
             config.modulus,
             config.modulus_inverse_word,
-            &mut output_device,
+            output_device,
         )?;
-        stream.synchronize()?;
         let output = output_device.to_host_vec(&stream)?;
-        montgomery_to_packed(&output, &config)
+        Ok(ArithmeticRun {
+            output: montgomery_to_packed(&output, &config)?,
+            launched: true,
+            device_buffer_allocations,
+            csr_cache_hit: None,
+            csr_cache_operations: 0,
+            output_cache_hit: Some(output_cache_hit),
+            stream_synchronizations: 1,
+        })
     }
 
     /// Runs one vector-fold kernel while the caller owns the runtime lock.
@@ -1238,20 +1525,22 @@ impl CudaRuntime {
         scalar: FieldLimbs,
         count: u32,
         config: DeviceFieldConfig,
-    ) -> Result<Vec<FieldLimbs>, CudaNovaError> {
+    ) -> Result<(Vec<FieldLimbs>, bool, u64), CudaNovaError> {
         if left.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false, 0));
         }
-        let _guard = self
-            .execution_lock
+        let mut workspace = self
+            .execution_workspace
             .lock()
             .map_err(|_| CudaNovaError::RuntimeStatePoisoned)?;
         self.context.bind_to_thread()?;
         let stream = self.context.default_stream();
         let left_device = DeviceBuffer::from_host(&stream, left)?;
         let right_device = DeviceBuffer::from_host(&stream, right)?;
-        let mut output_device = DeviceBuffer::<FieldLimbs>::zeroed(&stream, left.len())?;
-        stream.synchronize()?;
+        let output = workspace.output(&stream, left.len())?;
+        let output_cache_hit = output.hit;
+        let device_buffer_allocations = output.device_buffer_allocations + 2;
+        let output_device = output.value;
         self.module.fold_vectors(
             &stream,
             launch_config(left.len())?,
@@ -1261,11 +1550,55 @@ impl CudaRuntime {
             count,
             config.modulus,
             config.modulus_inverse_word,
-            &mut output_device,
+            output_device,
         )?;
-        stream.synchronize()?;
-        Ok(output_device.to_host_vec(&stream)?)
+        Ok((
+            output_device.to_host_vec(&stream)?,
+            output_cache_hit,
+            device_buffer_allocations,
+        ))
     }
+}
+
+/// Validates one canonical CSR input and returns its number of rows.
+fn validate_csr_input(
+    input: CsrMatrixInput<'_>,
+    field_width: usize,
+    vector_len: usize,
+) -> Result<usize, CudaNovaError> {
+    let rows = input
+        .row_offsets
+        .len()
+        .checked_sub(1)
+        .ok_or(CudaNovaError::SizeOverflow {
+            target: "CSR row count",
+        })?;
+    let values_count = input.values.len() / field_width;
+    if input.values.len() % field_width != 0
+        || values_count != input.column_indices.len()
+        || input.row_offsets.last().copied() != Some(values_count)
+    {
+        return Err(CudaNovaError::InvalidTranscript {
+            proposition: "CSR matrix buffers have compatible lengths",
+        });
+    }
+    let offsets_are_canonical = input.row_offsets.first().copied() == Some(0)
+        && input.row_offsets.windows(2).all(|pair| {
+            let [left, right] = pair else {
+                return false;
+            };
+            left <= right && *right <= values_count
+        });
+    let columns_are_in_bounds = input
+        .column_indices
+        .iter()
+        .all(|column| *column < vector_len);
+    if !offsets_are_canonical || !columns_are_in_bounds {
+        return Err(CudaNovaError::InvalidTranscript {
+            proposition: "CSR rows are canonical and columns address the dense vector",
+        });
+    }
+    Ok(rows)
 }
 
 /// Converts the canonical light-Poseidon table into device-resident limbs.

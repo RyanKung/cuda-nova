@@ -41,6 +41,25 @@ impl GpuBackend for CudaGpuBackend {
         )
     }
 
+    fn spmv_three(
+        &self,
+        row_offsets: [&[usize]; 3],
+        column_indices: [&[usize]; 3],
+        values: [&[u8]; 3],
+        vector: &[u8],
+        field_width: usize,
+        modulus: &[u8],
+    ) -> Option<[Vec<u8>; 3]> {
+        self.runtime.spmv_three(
+            row_offsets,
+            column_indices,
+            values,
+            vector,
+            field_width,
+            modulus,
+        )
+    }
+
     fn vector_linear_combination(
         &self,
         left: &[u8],
