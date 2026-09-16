@@ -15,10 +15,11 @@ fn main() -> Result<(), CudaNovaError> {
         steps.push(step);
     })?;
     let engine = CudaNovaEngine::new(0, "cuda_nova.ptx")?;
-    let report = engine.validate_steps(&steps)?;
+    let report = engine.benchmark_steps(&steps, 5)?;
     println!(
-        "cuda-nova preflight passed: {} step(s), {} encoded byte(s), upload={}us kernel={}us download={}us end_to_end={}us",
+        "cuda-nova resident preflight passed: {} step(s) x {} iteration(s), {} encoded byte(s), upload={}us kernel={}us download={}us end_to_end={}us",
         report.steps,
+        report.iterations,
         report.encoded_bytes,
         report.upload_microseconds,
         report.kernel_microseconds,

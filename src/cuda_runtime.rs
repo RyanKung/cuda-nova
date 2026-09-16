@@ -10,7 +10,9 @@ use cuda_device::{DisjointSlice, kernel, launch_bounds, thread};
 use cuda_host::cuda_module;
 use zkfly_commitment::TopologyFoldStep;
 
-use crate::{CudaNovaError, ENCODED_STEP_BYTES, ValidationReport, encode_steps};
+use crate::{
+    CudaNovaError, ENCODED_STEP_BYTES, ResidentValidationReport, ValidationReport, encode_steps,
+};
 
 /// Number of CUDA threads in one launch block.
 const BLOCK_SIZE: u32 = 256;
@@ -229,7 +231,7 @@ impl CudaRuntime {
         let download_start = Instant::now();
         let valid = valid_device.to_host_vec(&stream)?;
         let download_microseconds = duration_microseconds(download_start.elapsed());
-        if let Some((index, _)) = valid.iter().enumerate().find(|(_, value)| **value != 1_u32) {
+        if let Some(index) = first_invalid_lane(&valid) {
             return Err(CudaNovaError::GpuValidationFailed { index });
         }
         Ok(ValidationReport {
@@ -241,6 +243,77 @@ impl CudaRuntime {
             end_to_end_microseconds: duration_microseconds(end_to_end_start.elapsed()),
         })
     }
+
+    /// Uploads one transcript, launches its validator repeatedly, and
+    /// downloads one result vector after the final launch.
+    pub(crate) fn benchmark_steps(
+        &self,
+        steps: &[TopologyFoldStep],
+        iterations: usize,
+    ) -> Result<ResidentValidationReport, CudaNovaError> {
+        if iterations == 0 {
+            return Err(CudaNovaError::InvalidTranscript {
+                proposition: "benchmark iterations are positive",
+            });
+        }
+        let end_to_end_start = Instant::now();
+        let encoded = encode_steps(steps)?;
+        let step_count = u32::try_from(steps.len()).map_err(|_| CudaNovaError::SizeOverflow {
+            target: "CUDA step count",
+        })?;
+        let step_size =
+            u32::try_from(ENCODED_STEP_BYTES).map_err(|_| CudaNovaError::SizeOverflow {
+                target: "CUDA encoded step size",
+            })?;
+        let _guard = self
+            .execution_lock
+            .lock()
+            .map_err(|_| CudaNovaError::RuntimeStatePoisoned)?;
+        self.context.bind_to_thread()?;
+        let stream = self.context.default_stream();
+        let upload_start = Instant::now();
+        let encoded_device = DeviceBuffer::from_host(&stream, &encoded)?;
+        let mut valid_device = DeviceBuffer::<u32>::zeroed(&stream, steps.len())?;
+        stream.synchronize()?;
+        let upload_microseconds = duration_microseconds(upload_start.elapsed());
+        let launch = launch_config(steps.len())?;
+        let kernel_start = Instant::now();
+        for _ in 0..iterations {
+            self.module.validate_topology_steps(
+                &stream,
+                launch,
+                &encoded_device,
+                step_size,
+                step_count,
+                &mut valid_device,
+            )?;
+        }
+        stream.synchronize()?;
+        let kernel_microseconds = duration_microseconds(kernel_start.elapsed());
+        let download_start = Instant::now();
+        let valid = valid_device.to_host_vec(&stream)?;
+        let download_microseconds = duration_microseconds(download_start.elapsed());
+        if let Some(index) = first_invalid_lane(&valid) {
+            return Err(CudaNovaError::GpuValidationFailed { index });
+        }
+        Ok(ResidentValidationReport {
+            steps: steps.len(),
+            iterations,
+            encoded_bytes: encoded.len(),
+            upload_microseconds,
+            kernel_microseconds,
+            download_microseconds,
+            end_to_end_microseconds: duration_microseconds(end_to_end_start.elapsed()),
+        })
+    }
+}
+
+/// Returns the first device lane that did not accept the transcript.
+fn first_invalid_lane(valid: &[u32]) -> Option<usize> {
+    valid
+        .iter()
+        .enumerate()
+        .find_map(|(index, value)| (*value != 1_u32).then_some(index))
 }
 
 /// Builds a one-dimensional launch covering one lane per transcript step.

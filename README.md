@@ -9,7 +9,8 @@ The current engine has three explicit stages:
 
 1. encode `TopologyFoldStep` values into a stable 432-byte record;
 2. upload and preflight canonical indices, accumulator links, and padding on a
-   CUDA device with cuda-oxide;
+   CUDA device with cuda-oxide; `benchmark_steps` keeps those device buffers
+   resident while repeating the kernel to expose steady-state cost;
 3. delegate R1CS synthesis and recursive folding to `zkfly-nova`, which uses
    the official `nova-snark` crate.
 
@@ -26,6 +27,6 @@ CUDA_OXIDE_TARGET=sm_70 cargo oxide run \
   --features cuda --arch sm_70 --bin cuda-nova -- --prove
 ```
 
-The output includes upload, kernel, download, and end-to-end microsecond
-measurements. The numbers are a smoke baseline, not a full MaleCNS proof
-benchmark.
+The output includes upload, repeated-kernel, download, and end-to-end
+microsecond measurements. The numbers are a smoke baseline, not a full MaleCNS
+proof benchmark.

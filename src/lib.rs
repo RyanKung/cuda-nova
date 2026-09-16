@@ -42,6 +42,30 @@ pub struct ValidationReport {
     pub end_to_end_microseconds: u64,
 }
 
+/// A summary of repeated validation with one resident device allocation.
+///
+/// The encoded transcript and device output buffer are uploaded/allocated once;
+/// the kernel is then launched `iterations` times before one result download.
+/// This separates steady-state kernel cost from per-call transfer overhead.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResidentValidationReport {
+    /// Number of fold transitions checked by each device launch.
+    pub steps: usize,
+    /// Number of repeated kernel launches using the resident transcript.
+    pub iterations: usize,
+    /// Number of encoded transcript bytes resident during validation.
+    pub encoded_bytes: usize,
+    /// Host-to-device allocation and transfer time in microseconds.
+    pub upload_microseconds: u64,
+    /// All repeated kernel executions plus one stream synchronization in
+    /// microseconds.
+    pub kernel_microseconds: u64,
+    /// Device-to-host result transfer time in microseconds.
+    pub download_microseconds: u64,
+    /// End-to-end benchmark time, including encoding, in microseconds.
+    pub end_to_end_microseconds: u64,
+}
+
 /// Errors returned by the CUDA sidecar engine.
 #[derive(Debug, Error)]
 pub enum CudaNovaError {
@@ -158,6 +182,37 @@ impl CudaNovaEngine {
         #[cfg(not(all(feature = "cuda", target_os = "linux")))]
         {
             let _ = steps;
+            Err(CudaNovaError::BackendUnavailable)
+        }
+    }
+
+    /// Repeatedly validates one transcript while keeping device buffers
+    /// resident for the whole benchmark.
+    ///
+    /// This is the first reusable GPU boundary for larger batches: upload and
+    /// allocation happen once, while the kernel is launched `iterations`
+    /// times against the same encoded topology. The method does not create a
+    /// proof and therefore does not claim that Poseidon or Nova synthesis is
+    /// accelerated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transcript is malformed, `iterations` is zero,
+    /// a device lane rejects the transcript, or CUDA is unavailable in this
+    /// build.
+    pub fn benchmark_steps(
+        &self,
+        steps: &[TopologyFoldStep],
+        iterations: usize,
+    ) -> Result<ResidentValidationReport, CudaNovaError> {
+        #[cfg(all(feature = "cuda", target_os = "linux"))]
+        {
+            return self.runtime.benchmark_steps(steps, iterations);
+        }
+
+        #[cfg(not(all(feature = "cuda", target_os = "linux")))]
+        {
+            let _ = (steps, iterations);
             Err(CudaNovaError::BackendUnavailable)
         }
     }
