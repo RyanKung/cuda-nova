@@ -4,8 +4,9 @@ This crate connects CUDA Rust kernels compiled by
 [NVIDIA Research cuda-oxide](https://github.com/NVlabs/cuda-oxide) to
 [Microsoft Research Nova](https://github.com/microsoft/Nova), consumed as the
 `nova-snark` crate. It is a GPU arithmetic sidecar for Nova, not a new proof
-system or a HyperNova implementation. Its dependency and runtime boundary is
-designed for extraction into a standalone public repository.
+system or a HyperNova implementation. The repository is a standalone Cargo
+workspace: its zkfly relation crates and patched Nova source are exact-revision
+Git dependencies, so consumers do not need a Git submodule.
 
 ## Upstream and responsibility boundary
 
