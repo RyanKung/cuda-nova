@@ -1,0 +1,25 @@
+[package]
+name = "cuda-nova"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CUDA sidecar engine for topology-bound official Nova proofs"
+
+[features]
+default = []
+cuda = ["dep:cuda-core", "dep:cuda-device", "dep:cuda-host"]
+
+[dependencies]
+nova-snark.workspace = true
+thiserror.workspace = true
+zkfly-commitment = { path = "../zkfly-commitment" }
+zkfly-nova = { path = "../zkfly-nova" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "faea3959950d3bb40efb6a29d03bfbc65725bae6", optional = true }
+
+[lints]
+workspace = true
